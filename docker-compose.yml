@@ -1,0 +1,11 @@
+services:
+  psn-telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: psn-telegram-bot
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
