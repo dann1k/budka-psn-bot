@@ -13,7 +13,7 @@ jobs:
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       BUDKA_PSN_TELEGRAM_BOT_TOKEN: ${{ secrets.BUDKA_PSN_TELEGRAM_BOT_TOKEN }}
       BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET: ${{ secrets.BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET }}
       BUDKA_PSN_NPSSO: ${{ secrets.BUDKA_PSN_NPSSO }}
@@ -36,7 +36,7 @@ jobs:
           for name in \
             SUPABASE_ACCESS_TOKEN \
             SUPABASE_PROJECT_REF \
-            SUPABASE_DB_URL \
+            SUPABASE_DB_PASSWORD \
             BUDKA_PSN_TELEGRAM_BOT_TOKEN \
             BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET \
             BUDKA_PSN_NPSSO \
@@ -49,22 +49,14 @@ jobs:
           done
           exit "$missing"
 
-      - name: Validate database URL format
-        run: |
-          case "$SUPABASE_DB_URL" in
-            postgres://*|postgresql://*) ;;
-            *)
-              echo "::error::SUPABASE_DB_URL must be a percent-encoded Postgres connection string, not the Supabase project URL, API key, or database password by itself."
-              echo "::error::Expected format: postgresql://USER:PASSWORD@HOST:PORT/postgres"
-              exit 1
-              ;;
-          esac
-
       - name: Check Edge Function
         run: deno check supabase/functions/telegram-webhook/index.ts
 
+      - name: Link Supabase project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+
       - name: Apply database migrations
-        run: supabase db push --db-url "$SUPABASE_DB_URL"
+        run: supabase db push --linked
 
       - name: Set Supabase Edge Function secrets
         run: |

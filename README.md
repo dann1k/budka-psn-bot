@@ -76,14 +76,14 @@ GitHub Actions secrets:
 ```env
 SUPABASE_ACCESS_TOKEN=...
 SUPABASE_PROJECT_REF=...
-SUPABASE_DB_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres
+SUPABASE_DB_PASSWORD=...
 BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
 BUDKA_PSN_SUPABASE_SECRET_KEY=...
 ```
 
-`SUPABASE_DB_URL` — это именно Postgres connection string из Supabase Dashboard -> Connect -> Session pooler или Direct connection. Это не project URL `https://...supabase.co`, не `sb_secret_...` и не пароль отдельно. Если пароль содержит спецсимволы (`@`, `#`, `:`, `/`, `?`, `%`), его нужно percent-encode перед сохранением в GitHub secret.
+`SUPABASE_DB_PASSWORD` — пароль Postgres-базы проекта Supabase. Workflow использует его для `supabase link --project-ref "$SUPABASE_PROJECT_REF"` и затем применяет миграции через `supabase db push --linked`, поэтому вручную собирать `SUPABASE_DB_URL` не нужно.
 
 `BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET` передаётся в Telegram `setWebhook.secret_token`; Edge Function проверяет header `X-Telegram-Bot-Api-Secret-Token`.
 
@@ -92,10 +92,11 @@ BUDKA_PSN_SUPABASE_SECRET_KEY=...
 На каждый push в `main` workflow делает:
 
 1. `deno check supabase/functions/telegram-webhook/index.ts`;
-2. `supabase db push --db-url "$SUPABASE_DB_URL"`;
-3. `supabase secrets set ... --project-ref "$SUPABASE_PROJECT_REF"`;
-4. `supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF"`;
-5. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook`.
+2. `supabase link --project-ref "$SUPABASE_PROJECT_REF"`;
+3. `supabase db push --linked`;
+4. `supabase secrets set ... --project-ref "$SUPABASE_PROJECT_REF"`;
+5. `supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF"`;
+6. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook`.
 
 Перед первым деплоем нужно создать Supabase project и заполнить GitHub Actions secrets.
 
