@@ -12,7 +12,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 
 - `supabase/functions/telegram-webhook/index.ts` — HTTP entrypoint Edge Function: `GET` health-check, `POST` Telegram webhook, остальные методы `405`.
 - `supabase/functions/telegram-webhook/bot.ts` — команды Telegram и бизнес-логика.
-- `supabase/functions/telegram-webhook/repository.ts` — доступ к Supabase Postgres через service role key.
+- `supabase/functions/telegram-webhook/repository.ts` — доступ к Supabase Postgres через secret key.
 - `supabase/functions/telegram-webhook/psn.ts` — PSN API, авторизация через `BUDKA_PSN_NPSSO`, summary, presence, список платин.
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
@@ -51,7 +51,7 @@ Telegram-бот для групповых чатов с PSN-статистико
   - `username_normalized = lower(username)`;
   - `default_psn_online_id_normalized = lower(default_psn_online_id)`.
 - Уникальность PSN внутри группы: unique index `(chat_id, psn_online_id_normalized)`.
-- RLS включён, public policies не создаются. Edge Function работает через `BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY`.
+- RLS включён, public policies не создаются. Edge Function работает через `BUDKA_PSN_SUPABASE_SECRET_KEY`.
 - Foreign keys между `user_preferences` и `linked_accounts` намеренно не добавлены, чтобы сохранить текущее поведение default-аккаунта.
 
 ## Секреты
@@ -62,10 +62,12 @@ Runtime secrets Supabase Edge Function:
 BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
-BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY=...
+BUDKA_PSN_SUPABASE_SECRET_KEY=...
 ```
 
 `SUPABASE_URL` Supabase предоставляет Edge Function автоматически.
+
+`BUDKA_PSN_SUPABASE_SECRET_KEY` — это Supabase `Secret key` из Settings -> API Keys. В новом интерфейсе он заменяет legacy `service_role` key и нужен только backend-коду.
 
 Не использовать generic `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`: в общем Supabase project они могут принадлежать другим функциям. Для этого бота все runtime-секреты namespaced через `BUDKA_PSN_*`.
 
@@ -78,7 +80,7 @@ SUPABASE_DB_URL=...
 BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
-BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY=...
+BUDKA_PSN_SUPABASE_SECRET_KEY=...
 ```
 
 `BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET` передаётся в Telegram `setWebhook.secret_token`; Edge Function проверяет header `X-Telegram-Bot-Api-Secret-Token`.
@@ -119,7 +121,7 @@ curl http://127.0.0.1:54321/functions/v1/telegram-webhook
 
 ## Перенос старой SQLite-базы
 
-Скрипт читает `data/bot.sqlite` и импортирует строки в Supabase через REST/service role.
+Скрипт читает `data/bot.sqlite` и импортирует строки в Supabase через REST/secret key.
 
 Dry-run по умолчанию:
 
@@ -131,7 +133,7 @@ npm run migrate:dry-run
 
 ```bash
 SUPABASE_URL=https://PROJECT_REF.supabase.co \
-BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY=... \
+BUDKA_PSN_SUPABASE_SECRET_KEY=... \
 npm run migrate:apply
 ```
 

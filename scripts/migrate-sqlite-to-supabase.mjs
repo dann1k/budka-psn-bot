@@ -91,17 +91,17 @@ function normalizePreference(row) {
 
 async function postgrest(path, options = {}) {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY;
+  const secretKey = process.env.BUDKA_PSN_SUPABASE_SECRET_KEY;
 
-  if (!supabaseUrl || !serviceRoleKey) {
-    throw new Error("SUPABASE_URL and BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY are required for --apply");
+  if (!supabaseUrl || !secretKey) {
+    throw new Error("SUPABASE_URL and BUDKA_PSN_SUPABASE_SECRET_KEY are required for --apply");
   }
 
   const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/rest/v1/${path}`, {
     ...options,
     headers: {
-      apikey: serviceRoleKey,
-      authorization: `Bearer ${serviceRoleKey}`,
+      apikey: secretKey,
+      authorization: `Bearer ${secretKey}`,
       ...options.headers
     }
   });

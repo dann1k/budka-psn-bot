@@ -40,8 +40,8 @@ function assertNoError(error: { message: string } | null, action: string): void 
 export class LinkRepository {
   private readonly supabase: SupabaseClient;
 
-  constructor(supabaseUrl: string, serviceRoleKey: string) {
-    this.supabase = createClient(supabaseUrl, serviceRoleKey, {
+  constructor(supabaseUrl: string, secretKey: string) {
+    this.supabase = createClient(supabaseUrl, secretKey, {
       auth: {
         persistSession: false,
         autoRefreshToken: false

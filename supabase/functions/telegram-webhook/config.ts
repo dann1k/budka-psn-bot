@@ -5,7 +5,7 @@ type AppConfig = {
   telegramWebhookSecret: string;
   psnNpsso: string;
   supabaseUrl: string;
-  supabaseServiceRoleKey: string;
+  supabaseSecretKey: string;
   emojis: typeof emojis;
 };
 
@@ -25,7 +25,7 @@ export function getConfig(): AppConfig {
     telegramWebhookSecret: readRequired("BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET"),
     psnNpsso: readRequired("BUDKA_PSN_NPSSO"),
     supabaseUrl: readRequired("SUPABASE_URL"),
-    supabaseServiceRoleKey: readRequired("BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY"),
+    supabaseSecretKey: readRequired("BUDKA_PSN_SUPABASE_SECRET_KEY"),
     emojis
   };
 }

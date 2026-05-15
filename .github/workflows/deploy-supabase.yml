@@ -17,7 +17,7 @@ jobs:
       BUDKA_PSN_TELEGRAM_BOT_TOKEN: ${{ secrets.BUDKA_PSN_TELEGRAM_BOT_TOKEN }}
       BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET: ${{ secrets.BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET }}
       BUDKA_PSN_NPSSO: ${{ secrets.BUDKA_PSN_NPSSO }}
-      BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY }}
+      BUDKA_PSN_SUPABASE_SECRET_KEY: ${{ secrets.BUDKA_PSN_SUPABASE_SECRET_KEY }}
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
             BUDKA_PSN_TELEGRAM_BOT_TOKEN \
             BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET \
             BUDKA_PSN_NPSSO \
-            BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY
+            BUDKA_PSN_SUPABASE_SECRET_KEY
           do
             if [ -z "${!name}" ]; then
               echo "::error::${name} is not set"
@@ -61,7 +61,7 @@ jobs:
             BUDKA_PSN_TELEGRAM_BOT_TOKEN="$BUDKA_PSN_TELEGRAM_BOT_TOKEN" \
             BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET="$BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET" \
             BUDKA_PSN_NPSSO="$BUDKA_PSN_NPSSO" \
-            BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY="$BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY" \
+            BUDKA_PSN_SUPABASE_SECRET_KEY="$BUDKA_PSN_SUPABASE_SECRET_KEY" \
             --project-ref "$SUPABASE_PROJECT_REF"
 
       - name: Deploy Edge Function

@@ -5,7 +5,7 @@ import { PsnService } from "./psn.ts";
 import { LinkRepository } from "./repository.ts";
 
 const config = getConfig();
-const repository = new LinkRepository(config.supabaseUrl, config.supabaseServiceRoleKey);
+const repository = new LinkRepository(config.supabaseUrl, config.supabaseSecretKey);
 const psnService = new PsnService(config.psnNpsso);
 const bot = createBot(config, repository, psnService);
 const handleTelegramWebhook = webhookCallback(bot, "std/http", {
