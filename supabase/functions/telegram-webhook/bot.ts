@@ -580,7 +580,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await replyToCommand(ctx, "Меню budka-psn-bot", {
+    await replyToCommand(ctx, "Меню:", {
       reply_markup: buildActionMenu(actor.id)
     });
   }
