@@ -126,7 +126,7 @@ docker compose up -d --build
 ## Деплой на сервер
 
 ```bash
-git clone https://github.com/kroopik/psn-telegram-bot.git
+git clone https://github.com/dann1k/psn-telegram-bot.git
 cd psn-telegram-bot
 cp .env.example .env
 mkdir -p data

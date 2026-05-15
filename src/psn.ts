@@ -11,6 +11,7 @@ export type PsnSummary = {
   onlineId: string;
   accountId: string;
   profileUrl: string;
+  avatarUrl: string | null;
   hasPlus: boolean;
   presence: {
     status: "playing" | "online" | "offline";
@@ -127,6 +128,7 @@ export class PsnService {
       onlineId: profile.onlineId ?? onlineId,
       accountId: profile.accountId,
       profileUrl,
+      avatarUrl: profile.avatarUrls?.[0]?.avatarUrl ?? null,
       hasPlus: profile.plus === 1,
       presence,
       recentGames: playedGames,

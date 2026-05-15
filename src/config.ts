@@ -40,8 +40,8 @@ const defaultEmojiConfig: EmojiConfig = {
     profile: { value: "PSN" },
     plus: { value: "➕" },
     statusOnline: { value: "🟢" },
-    statusOffline: { value: "⚪" },
-    statusPlaying: { value: "🎮" }
+    statusOffline: { value: "🔘" },
+    statusPlaying: { value: "🚫" }
   }
 };
 

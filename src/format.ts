@@ -91,12 +91,13 @@ function buildAccountListParts(accounts: AccountLabel[], emojis: EmojiConfig): R
     }
 
     parts.push({ type: "text", value: account.onlineId });
-    parts.push({ type: "text", value: ` ${getFlagEmoji(account.regionCode)}` });
 
     if (account.hasPlus) {
       parts.push({ type: "text", value: " " });
       parts.push({ type: "emoji", token: emojis.icons.plus });
     }
+
+    parts.push({ type: "text", value: ` ${getFlagEmoji(account.regionCode)}` });
   });
 
   return parts;
@@ -232,13 +233,13 @@ export function formatSummary(input: {
       { type: "emoji", token: getStatusEmojiToken(account.status, emojis) },
       { type: "text", value: " " },
       { type: "bold", value: account.onlineId },
-      { type: "text", value: ` ${getFlagEmoji(account.regionCode)}` },
       ...(account.hasPlus
         ? [
             { type: "text", value: " " } as const,
             { type: "emoji", token: emojis.icons.plus } as const
           ]
-        : [])
+        : []),
+      { type: "text", value: ` ${getFlagEmoji(account.regionCode)}` }
     ],
     [{ type: "text", value: activityLine }],
     [{ type: "text", value: "" }],

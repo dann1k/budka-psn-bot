@@ -124,6 +124,14 @@ function formatTelegramName(user: Pick<LinkedUser, "displayName">): string {
   return user.displayName;
 }
 
+function shiftEntities(entities: MessageEntity[], prefix: string): MessageEntity[] {
+  const shift = utf16Length(prefix);
+  return entities.map((entity) => ({
+    ...entity,
+    offset: entity.offset + shift
+  }));
+}
+
 function getTrophyWeight(summary: Pick<AggregatedPlayer, "trophies">): number {
   return (
     summary.trophies.platinum * 1000 +
@@ -149,6 +157,32 @@ async function replyToCommand(
         }
       : undefined
   });
+}
+
+async function replySummary(
+  ctx: {
+    reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+    replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+    msg?: { message_id: number };
+  },
+  text: string,
+  entities: MessageEntity[],
+  avatarUrl?: string | null
+): Promise<void> {
+  if (avatarUrl && ctx.replyWithPhoto) {
+    await ctx.replyWithPhoto(avatarUrl, {
+      caption: text,
+      caption_entities: entities,
+      reply_parameters: ctx.msg
+        ? {
+            message_id: ctx.msg.message_id
+          }
+        : undefined
+    });
+    return;
+  }
+
+  await replyToCommand(ctx, text, { entities });
 }
 
 async function resolveTargetUser(
@@ -300,6 +334,21 @@ bot.command("link", async (ctx) => {
 
   try {
     const summary = await psnService.getSummaryByOnlineId(onlineId);
+    const canonicalOwner = repository.getAccountOwner(ctx.chat.id, summary.onlineId);
+
+    if (canonicalOwner && canonicalOwner.userId !== actor.id) {
+      await replyToCommand(
+        ctx,
+        `Профиль ${canonicalOwner.psnOnlineId} уже привязан в этой группе к ${formatTelegramLabel(canonicalOwner)}.`
+      );
+      return;
+    }
+
+    if (canonicalOwner && canonicalOwner.userId === actor.id) {
+      await replyToCommand(ctx, `Профиль ${canonicalOwner.psnOnlineId} уже привязан к тебе.`);
+      return;
+    }
+
     repository.addLink({
       chatId: ctx.chat.id,
       userId: actor.id,
@@ -401,10 +450,14 @@ bot.command("summary", async (ctx) => {
         },
         config.emojis
       );
+      const prefix = "Данные напрямую из PSN\n\n";
 
-      await replyToCommand(ctx, summaryMessage.text, {
-        entities: summaryMessage.entities
-      });
+      await replySummary(
+        ctx,
+        `${prefix}${summaryMessage.text}`,
+        shiftEntities(summaryMessage.entities, prefix),
+        summary.avatarUrl
+      );
     } catch (error) {
       const message = formatPsnError(error, targetArg);
       await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -437,9 +490,13 @@ bot.command("summary", async (ctx) => {
       },
       config.emojis
     );
-    await replyToCommand(ctx, summaryMessage.text, {
-      entities: summaryMessage.entities
-    });
+    const prefix = `${formatTelegramName(targetUser)}\n\n`;
+    await replySummary(
+      ctx,
+      `${prefix}${summaryMessage.text}`,
+      shiftEntities(summaryMessage.entities, prefix),
+      preferred.summary.avatarUrl
+    );
   } catch (error) {
     const message = formatPsnError(error);
     await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -588,7 +645,7 @@ bot.command("plats", async (ctx) => {
 
     const messages = chunkRichMessages([
       {
-        text: `Платины ${formatTelegramLabel(targetUser)} (${sortedGroups.length}):`,
+        text: `Платины ${formatTelegramLabel(targetUser)} (${sortedGroups.length}):\n`,
         entities: [
           {
             type: "bold",
@@ -610,8 +667,7 @@ bot.command("plats", async (ctx) => {
           {
             showPlatform:
               (normalizedTitleCounts.get(group.titleName.trim().toLocaleLowerCase("ru-RU")) ?? 0) > 1,
-            showRegions:
-              (normalizedTitleCounts.get(group.titleName.trim().toLocaleLowerCase("ru-RU")) ?? 0) > 1
+            showRegions: group.occurrences.length > 1
           }
         )
       )
@@ -697,7 +753,7 @@ bot.command("table", async (ctx) => {
       .map((player) =>
         formatLeaderboardRow(
           {
-            telegramLabel: formatTelegramLabel(player.user),
+            telegramLabel: formatTelegramName(player.user),
             accounts: player.accounts,
             level: player.level,
             trophies: player.trophies
