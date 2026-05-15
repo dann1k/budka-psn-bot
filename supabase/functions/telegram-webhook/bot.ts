@@ -51,6 +51,12 @@ type PopularGameAccumulator = {
   }>;
 };
 
+type PopularSkippedAccount = {
+  psnOnlineId: string;
+  telegramLabel: string;
+  reason: string;
+};
+
 function ensureGroup(chatType: string): boolean {
   return chatType === "group" || chatType === "supergroup";
 }
@@ -137,6 +143,10 @@ function formatTelegramLabel(user: Pick<LinkedUser, "username" | "displayName">)
 
 function formatTelegramName(user: Pick<LinkedUser, "displayName">): string {
   return user.displayName;
+}
+
+function formatNonMentionTelegramLabel(user: Pick<LinkedUser, "username" | "displayName">): string {
+  return user.username ?? user.displayName;
 }
 
 function shiftEntities(entities: MessageEntity[], prefix: string): MessageEntity[] {
@@ -254,6 +264,64 @@ function formatParticipantList(labels: string[], limit = 6): string {
   return `${labels.slice(0, limit).join(", ")} и ещё ${labels.length - limit}`;
 }
 
+function getErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const candidate = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: {
+      status?: unknown;
+    };
+  };
+  const status = candidate.status ?? candidate.statusCode ?? candidate.response?.status;
+
+  if (typeof status === "number") {
+    return status;
+  }
+
+  if (typeof status === "string") {
+    const parsed = Number.parseInt(status, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function formatPopularSkipReason(error: unknown): string {
+  const status = getErrorStatus(error);
+  const message = error instanceof Error ? error.message : "";
+  const normalizedMessage = message.toLowerCase();
+
+  if (status === 401 || normalizedMessage.includes("unauthorized") || normalizedMessage.includes("access token")) {
+    return "ошибка авторизации PSN";
+  }
+
+  if (status === 403 || normalizedMessage.includes("forbidden") || normalizedMessage.includes("privacy")) {
+    return "нет доступа или закрытая активность";
+  }
+
+  if (status === 404 || normalizedMessage.includes("user not found") || normalizedMessage.includes("not found")) {
+    return "профиль или список игр не найден";
+  }
+
+  if (status && status >= 500) {
+    return "временная ошибка PSN";
+  }
+
+  if (
+    normalizedMessage.includes("network") ||
+    normalizedMessage.includes("timeout") ||
+    normalizedMessage.includes("fetch")
+  ) {
+    return "ошибка сети";
+  }
+
+  return message ? message.slice(0, 120) : "неизвестная ошибка";
+}
+
 export function createBot(config: BotConfig, repository: LinkRepository, psnService: PsnService): Bot {
   const bot = new Bot(config.botToken);
 
@@ -357,6 +425,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "/table — общая таблица игроков группы",
         "/plats [@telegram] — список платин игрока по всем аккаунтам",
         "/popular — топ-3 игры по числу участников чата",
+        "/popular debug — показать причины пропущенных аккаунтов",
         "/unlink [online-id] — удалить один аккаунт или все свои привязки",
         "/help — показать эту справку"
       ].join("\n")
@@ -804,6 +873,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
+    const isDebug = getCommandArg(ctx.message?.text)?.toLowerCase() === "debug";
     const users = await repository.listUsers(ctx.chat.id);
     if (users.length === 0) {
       await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
@@ -832,26 +902,33 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       try {
         return {
           user: job.user,
+          psnOnlineId: job.psnOnlineId,
           games: await psnService.getPlayedGamesByOnlineId(job.psnOnlineId),
-          failed: false
+          skipped: null as PopularSkippedAccount | null
         };
-      } catch {
+      } catch (error) {
+        console.error(`Could not load played games for ${job.psnOnlineId}:`, error);
         return {
           user: job.user,
+          psnOnlineId: job.psnOnlineId,
           games: [] as PsnPlayedGame[],
-          failed: true
+          skipped: {
+            psnOnlineId: job.psnOnlineId,
+            telegramLabel: formatNonMentionTelegramLabel(job.user),
+            reason: formatPopularSkipReason(error)
+          }
         };
       }
     });
 
-    const skippedAccounts = results.filter((result) => result.failed).length;
+    const skippedAccounts = results.flatMap((result) => result.skipped ? [result.skipped] : []);
     const gamesByUser = new Map<number, {
       user: LinkedUser;
       games: Map<string, PsnPlayedGame>;
     }>();
 
     for (const result of results) {
-      if (result.failed) {
+      if (result.skipped) {
         continue;
       }
 
@@ -893,7 +970,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           : existing.name;
         existing.latestPlayedAt = latestPlayedAt;
         existing.players.set(user.userId, {
-          label: formatTelegramLabel(user),
+          label: formatNonMentionTelegramLabel(user),
           latestPlayedAt: game.lastPlayedAt
         });
         popularGames.set(game.key, existing);
@@ -903,8 +980,19 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (popularGames.size === 0) {
       await replyToCommand(
         ctx,
-        skippedAccounts > 0
-          ? `Не получилось собрать популярные игры: все ${skippedAccounts} аккаунтов недоступны.`
+        skippedAccounts.length > 0
+          ? [
+              `Не получилось собрать популярные игры: все ${skippedAccounts.length} аккаунтов недоступны.`,
+              ...(isDebug
+                ? [
+                    "",
+                    "Пропущенные аккаунты:",
+                    ...skippedAccounts
+                      .slice(0, 10)
+                      .map((account) => `- ${account.psnOnlineId} (${account.telegramLabel}): ${account.reason}`)
+                  ]
+                : [])
+            ].join("\n")
           : "Не нашёл сыгранных игр у привязанных участников."
       );
       return;
@@ -939,7 +1027,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           "участников"
         ])}: ${formatParticipantList(players)}`;
       }),
-      ...(skippedAccounts > 0 ? ["", `Пропущено аккаунтов: ${skippedAccounts}`] : [])
+      ...(skippedAccounts.length > 0 ? ["", `Пропущено аккаунтов: ${skippedAccounts.length}`] : []),
+      ...(isDebug && skippedAccounts.length > 0
+        ? [
+            "",
+            "Пропущенные аккаунты:",
+            ...skippedAccounts
+              .slice(0, 10)
+              .map((account) => `- ${account.psnOnlineId} (${account.telegramLabel}): ${account.reason}`),
+            ...(skippedAccounts.length > 10 ? [`...и ещё ${skippedAccounts.length - 10}`] : [])
+          ]
+        : [])
     ];
 
     await replyToCommand(ctx, lines.join("\n"));
