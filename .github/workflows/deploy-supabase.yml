@@ -49,6 +49,17 @@ jobs:
           done
           exit "$missing"
 
+      - name: Validate database URL format
+        run: |
+          case "$SUPABASE_DB_URL" in
+            postgres://*|postgresql://*) ;;
+            *)
+              echo "::error::SUPABASE_DB_URL must be a percent-encoded Postgres connection string, not the Supabase project URL, API key, or database password by itself."
+              echo "::error::Expected format: postgresql://USER:PASSWORD@HOST:PORT/postgres"
+              exit 1
+              ;;
+          esac
+
       - name: Check Edge Function
         run: deno check supabase/functions/telegram-webhook/index.ts
 
