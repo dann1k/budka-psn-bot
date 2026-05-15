@@ -60,6 +60,77 @@ export type PsnTrophyTitleGameSource = {
   games: PsnPlayedGame[];
 };
 
+type PsnTrophyTitle = {
+  trophyTitleName?: string;
+  trophyTitlePlatform?: string;
+  npServiceName?: string;
+  npCommunicationId?: string;
+  lastUpdatedDateTime?: string;
+  earnedTrophies?: {
+    platinum?: number;
+    gold?: number;
+    silver?: number;
+    bronze?: number;
+  };
+};
+
+type PsnUserTitlesPage = {
+  trophyTitles: PsnTrophyTitle[];
+  nextOffset?: number;
+};
+
+function getPsnApiErrorMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const error = (value as {
+    error?: {
+      message?: unknown;
+      reason?: unknown;
+      code?: unknown;
+    };
+  }).error;
+
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const message = typeof error.message === "string" ? error.message : null;
+  const reason = typeof error.reason === "string" ? error.reason : null;
+  const code = error.code === undefined ? null : String(error.code);
+
+  return [message ?? reason ?? "Unexpected PSN error", code ? `code ${code}` : null]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function normalizeUserTitlesPage(value: unknown, onlineId: string): PsnUserTitlesPage {
+  const errorMessage = getPsnApiErrorMessage(value);
+
+  if (errorMessage) {
+    throw new Error(`PSN trophy titles unavailable for ${onlineId}: ${errorMessage}`);
+  }
+
+  if (!value || typeof value !== "object") {
+    throw new Error(`PSN trophy titles unavailable for ${onlineId}: empty response`);
+  }
+
+  const rawPage = value as {
+    trophyTitles?: unknown;
+    nextOffset?: unknown;
+  };
+
+  if (!Array.isArray(rawPage.trophyTitles)) {
+    throw new Error(`PSN trophy titles unavailable for ${onlineId}: malformed response`);
+  }
+
+  return {
+    trophyTitles: rawPage.trophyTitles as PsnTrophyTitle[],
+    nextOffset: typeof rawPage.nextOffset === "number" ? rawPage.nextOffset : undefined
+  };
+}
+
 function normalizeTrophies(
   trophies:
     | {
@@ -221,19 +292,22 @@ export class PsnService {
       let offset = 0;
 
       while (true) {
-        const page = await psnApi.getUserTitles(
-          { accessToken },
-          profile.accountId,
-          { limit: 800, offset }
+        const page = normalizeUserTitlesPage(
+          await psnApi.getUserTitles(
+            { accessToken },
+            profile.accountId,
+            { limit: 800, offset }
+          ),
+          profile.onlineId ?? onlineId
         );
 
         titles.push(
           ...page.trophyTitles
             .filter((title) => normalizeTrophies(title.earnedTrophies).platinum > 0)
             .map((title) => ({
-              titleName: title.trophyTitleName,
-              platform: title.trophyTitlePlatform,
-              earnedAt: title.lastUpdatedDateTime,
+              titleName: title.trophyTitleName ?? "Unknown title",
+              platform: title.trophyTitlePlatform ?? "unknown",
+              earnedAt: title.lastUpdatedDateTime ?? "",
               profileUrl,
               onlineId: profile.onlineId ?? onlineId,
               region
@@ -259,16 +333,19 @@ export class PsnService {
       let offset = 0;
 
       while (true) {
-        const page = await psnApi.getUserTitles(
-          { accessToken },
-          profile.accountId,
-          { limit: 800, offset }
+        const page = normalizeUserTitlesPage(
+          await psnApi.getUserTitles(
+            { accessToken },
+            profile.accountId,
+            { limit: 800, offset }
+          ),
+          profile.onlineId ?? onlineId
         );
 
         titleCount += page.trophyTitles.length;
 
         for (const title of page.trophyTitles) {
-          const name = title.trophyTitleName;
+          const name = title.trophyTitleName ?? "";
           const normalizedName = normalizeGameName(name);
 
           if (!normalizedName) {
