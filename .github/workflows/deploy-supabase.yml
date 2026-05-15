@@ -71,7 +71,7 @@ jobs:
           PAYLOAD="$(jq -nc \
             --arg url "$WEBHOOK_URL" \
             --arg secret "$BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET" \
-            '{url: $url, secret_token: $secret, allowed_updates: ["message"], drop_pending_updates: false}')"
+            '{url: $url, secret_token: $secret, allowed_updates: ["message", "callback_query"], drop_pending_updates: false}')"
 
           curl --fail --silent --show-error \
             --request POST "https://api.telegram.org/bot${BUDKA_PSN_TELEGRAM_BOT_TOKEN}/setWebhook" \

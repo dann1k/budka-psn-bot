@@ -1,6 +1,8 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type { LinkedAccount, LinkedUser } from "./types.ts";
 
+export type PendingTelegramAction = "link" | "summary_psn" | "default" | "unlink";
+
 type LinkedAccountRow = {
   chat_id: number | string;
   user_id: number | string;
@@ -14,6 +16,14 @@ type UserPreferenceRow = {
   chat_id: number | string;
   user_id: number | string;
   default_psn_online_id: string | null;
+};
+
+type PendingActionRow = {
+  chat_id: number | string;
+  user_id: number | string;
+  action: PendingTelegramAction;
+  created_at: string;
+  expires_at: string;
 };
 
 function toLinkedAccount(row: LinkedAccountRow): LinkedAccount {
@@ -249,5 +259,46 @@ export class LinkRepository {
       );
 
     assertNoError(error, "Не получилось сохранить default-аккаунт");
+  }
+
+  async setPendingAction(chatId: number, userId: number, action: PendingTelegramAction): Promise<void> {
+    const { error } = await this.supabase
+      .from("telegram_pending_actions")
+      .upsert(
+        {
+          chat_id: chatId,
+          user_id: userId,
+          action,
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 10 * 60_000).toISOString()
+        },
+        {
+          onConflict: "chat_id,user_id"
+        }
+      );
+
+    assertNoError(error, "Не получилось сохранить ожидаемое действие");
+  }
+
+  async getPendingAction(chatId: number, userId: number): Promise<PendingActionRow | null> {
+    const { data, error } = await this.supabase
+      .from("telegram_pending_actions")
+      .select("chat_id,user_id,action,created_at,expires_at")
+      .eq("chat_id", chatId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    assertNoError(error, "Не получилось получить ожидаемое действие");
+    return data ? (data as PendingActionRow) : null;
+  }
+
+  async clearPendingAction(chatId: number, userId: number): Promise<void> {
+    const { error } = await this.supabase
+      .from("telegram_pending_actions")
+      .delete()
+      .eq("chat_id", chatId)
+      .eq("user_id", userId);
+
+    assertNoError(error, "Не получилось очистить ожидаемое действие");
   }
 }

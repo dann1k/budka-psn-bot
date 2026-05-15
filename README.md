@@ -21,10 +21,20 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `.github/workflows/deploy-supabase.yml` — автодеплой на push в `main`.
 - `scripts/migrate-sqlite-to-supabase.mjs` — одноразовый перенос старой SQLite-базы.
 
-## Команды бота
+## Меню и команды бота
 
-`/start` и `/help` показывают справку. Остальные команды рассчитаны на `group` и `supergroup`.
+Основной вход для пользователей — `/menu`. Бот отправляет персональное inline-меню под сообщением; чужие клики по этому меню блокируются, а результаты кнопок отправляются новыми сообщениями. `/start` и `/help` показывают menu-first справку. Остальные команды рассчитаны на `group` и `supergroup`.
 
+Кнопки меню:
+
+- `Моя сводка`, `Мои аккаунты`, `Таблица`, `Популярные`, `Платины`, `Регионы` — выполняют действие сразу для отправителя или группы.
+- `Привязать PSN`, `Выбрать default`, `Summary по игроку`, `Отвязать PSN` — включают пошаговый режим и ждут следующий текст от того же пользователя в том же чате.
+- Для `Summary по игроку` следующим сообщением можно прислать `@telegram` участника чата или PSN Online ID; для своей сводки есть быстрая кнопка `Моя сводка`.
+- `/cancel` отменяет ожидаемый ввод PSN ID или цели summary; любая другая slash-команда тоже сбрасывает старое ожидание и выполняется как обычно.
+
+Быстрые команды остаются доступны:
+
+- `/menu` — открыть персональное меню.
 - `/link <online-id>` — привязать PSN-аккаунт к отправителю команды.
 - `/me` — показать свои PSN-аккаунты и обновить Telegram metadata.
 - `/summary` — сводка по своим привязкам.
@@ -40,6 +50,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `/unlink` — удалить все свои привязки в текущей группе.
 - `/unlink <online-id>` — удалить одну свою привязку.
 - `/table` — таблица группы по PSN.
+- `/cancel` — отменить пошаговое действие из меню.
 
 ## Supabase база данных
 
@@ -47,6 +58,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 
 - `linked_accounts` хранит связи `chat_id + user_id -> psn_online_id`.
 - `user_preferences` хранит выбранный `default_psn_online_id`.
+- `telegram_pending_actions` хранит временное пошаговое действие меню для пары `chat_id + user_id`.
 - `psn_auth_state` хранит один глобальный зашифрованный PSN auth state бота.
 - `chat_id` и `user_id` — `bigint`.
 - `linked_at` — `timestamptz`.
@@ -56,6 +68,7 @@ Telegram-бот для групповых чатов с PSN-статистико
   - `default_psn_online_id_normalized = lower(default_psn_online_id)`.
 - Уникальность PSN внутри группы: unique index `(chat_id, psn_online_id_normalized)`.
 - RLS включён, public policies не создаются. Edge Function работает через `BUDKA_PSN_SUPABASE_SECRET_KEY`.
+- Pending actions живут 10 минут, затем следующий ввод считается истёкшим и очищается.
 - Foreign keys между `user_preferences` и `linked_accounts` намеренно не добавлены, чтобы сохранить текущее поведение default-аккаунта.
 - В `psn_auth_state` access/refresh tokens хранятся в формате `v1:<iv-base64>:<ciphertext-base64>` и шифруются AES-GCM ключом `BUDKA_PSN_AUTH_ENCRYPTION_KEY`.
 
@@ -106,7 +119,7 @@ BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 1. `deno check supabase/functions/telegram-webhook/index.ts`;
 2. `supabase secrets set ... --project-ref "$SUPABASE_PROJECT_REF"`;
 3. `supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF"`;
-4. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook`.
+4. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook` с `allowed_updates: ["message", "callback_query"]`.
 
 Перед первым деплоем нужно создать Supabase project и заполнить GitHub Actions secrets.
 
@@ -117,11 +130,12 @@ BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 1. Открыть Supabase Dashboard -> SQL Editor.
 2. Скопировать и выполнить SQL из `supabase/migrations/20260515000000_create_bot_tables.sql`.
 3. Скопировать и выполнить SQL из `supabase/migrations/20260515010000_create_psn_auth_state.sql`.
-4. Проверить, что появились таблицы `linked_accounts`, `user_preferences` и `psn_auth_state`.
+4. Скопировать и выполнить SQL из `supabase/migrations/20260515190000_create_telegram_pending_actions.sql`.
+5. Проверить, что появились таблицы `linked_accounts`, `user_preferences`, `psn_auth_state` и `telegram_pending_actions`.
 
 Эти миграции идемпотентные: в них используются `if not exists`, поэтому повторный запуск не должен пересоздать таблицы.
 
-Если таблицы `linked_accounts` и `user_preferences` уже созданы, достаточно выполнить только `20260515010000_create_psn_auth_state.sql`.
+Если таблицы `linked_accounts`, `user_preferences` и `psn_auth_state` уже созданы, достаточно выполнить только `20260515190000_create_telegram_pending_actions.sql`.
 
 ## Локальная проверка
 

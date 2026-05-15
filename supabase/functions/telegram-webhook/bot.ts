@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError } from "npm:grammy@1.41.1/web";
+import { Bot, GrammyError, HttpError, InlineKeyboard } from "npm:grammy@1.41.1/web";
 import type { MessageEntity } from "npm:grammy@1.41.1/types";
 import {
   formatLeaderboardRow,
@@ -8,6 +8,7 @@ import {
   type AccountLabel
 } from "./format.ts";
 import { LinkRepository } from "./repository.ts";
+import type { PendingTelegramAction } from "./repository.ts";
 import {
   PsnPrivateProfileError,
   PsnService,
@@ -61,6 +62,47 @@ type PopularSkippedAccount = {
   psnOnlineId: string;
   telegramLabel: string;
   reason: string;
+};
+
+type TelegramActor = {
+  id: number;
+  username?: string;
+  first_name: string;
+  last_name?: string;
+};
+
+type TelegramActionContext = {
+  chat: {
+    id: number;
+    type: string;
+  };
+  from?: TelegramActor;
+  msg?: {
+    message_id: number;
+    text?: string;
+  };
+  reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+  replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+};
+
+type MenuAction =
+  | "summary"
+  | "me"
+  | "table"
+  | "popular"
+  | "plats"
+  | "region"
+  | "link"
+  | "default"
+  | "summary_psn"
+  | "unlink"
+  | "close";
+
+const PENDING_ACTION_LABELS: Record<PendingTelegramAction, string> = {
+  link: "Привязать PSN",
+  summary_psn: "Summary по игроку или PSN ID",
+  default: "Выбрать default",
+  unlink: "Отвязать PSN"
 };
 
 function ensureGroup(chatType: string): boolean {
@@ -308,6 +350,64 @@ function formatPopularDebugAccountList(accounts: PopularDebugAccount[], limit = 
   return `${formatted}; и ещё ${accounts.length - limit}`;
 }
 
+function buildMenuCallbackData(ownerId: number, action: MenuAction): string {
+  return `menu:${ownerId}:${action}`;
+}
+
+function parseMenuCallbackData(value: string | undefined): { ownerId: number; action: MenuAction } | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = /^menu:(\d+):([a-z_]+)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  const action = match[2] as MenuAction;
+  if (![
+    "summary",
+    "me",
+    "table",
+    "popular",
+    "plats",
+    "region",
+    "link",
+    "default",
+    "summary_psn",
+    "unlink",
+    "close"
+  ].includes(action)) {
+    return null;
+  }
+
+  return {
+    ownerId: Number(match[1]),
+    action
+  };
+}
+
+function buildActionMenu(ownerId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Моя сводка", buildMenuCallbackData(ownerId, "summary"))
+    .text("Мои аккаунты", buildMenuCallbackData(ownerId, "me"))
+    .row()
+    .text("Таблица", buildMenuCallbackData(ownerId, "table"))
+    .text("Популярные", buildMenuCallbackData(ownerId, "popular"))
+    .row()
+    .text("Платины", buildMenuCallbackData(ownerId, "plats"))
+    .text("Регионы", buildMenuCallbackData(ownerId, "region"))
+    .row()
+    .text("Привязать PSN", buildMenuCallbackData(ownerId, "link"))
+    .row()
+    .text("Выбрать default", buildMenuCallbackData(ownerId, "default"))
+    .text("Summary по игроку", buildMenuCallbackData(ownerId, "summary_psn"))
+    .row()
+    .text("Отвязать PSN", buildMenuCallbackData(ownerId, "unlink"))
+    .row()
+    .text("Закрыть", buildMenuCallbackData(ownerId, "close"));
+}
+
 function getErrorStatus(error: unknown): number | null {
   if (!error || typeof error !== "object") {
     return null;
@@ -451,57 +551,58 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     };
   }
 
-  async function sendHelp(ctx: {
-    reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
-    msg?: { message_id: number };
-  }) {
-    await replyToCommand(
-      ctx,
-      [
-        "Я бот для привязки участников чата к нескольким PSN-аккаунтам.",
-        "Команды:",
-        "/link <online-id> — добавить PSN-аккаунт к себе",
-        "/me — показать свои привязанные аккаунты",
-        "/summary [@telegram] — суммарная сводка по игроку",
-        "/summary <psn-id> — сводка напрямую из PSN",
-        "/default <online-id> — выбрать приоритетный аккаунт для summary",
-        "/region [@telegram] — регионы аккаунтов игрока",
-        "/table — общая таблица игроков группы",
-        "/plats [@telegram] — список платин игрока по всем аккаунтам",
-        "/popular — топ-5 игр по числу участников чата",
-        "/popular debug [game] — причины пропусков и поиск игровых бакетов",
-        "/unlink [online-id] — удалить один аккаунт или все свои привязки",
-        "/help — показать эту справку"
-      ].join("\n")
-    );
-  }
-
-  bot.command("start", async (ctx) => {
-    await sendHelp(ctx);
-  });
-
-  bot.command("help", async (ctx) => {
-    await sendHelp(ctx);
-  });
-
-  bot.command("link", async (ctx) => {
+  async function ensureGroupContext(ctx: TelegramActionContext): Promise<boolean> {
     if (!ensureGroup(ctx.chat.type)) {
       await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
+      return false;
     }
 
-    const onlineId = getCommandArg(ctx.message?.text);
-    if (!onlineId) {
-      await replyToCommand(ctx, "Укажи PSN Online ID: /link your-online-id");
-      return;
-    }
+    return true;
+  }
 
+  async function requireActor(ctx: TelegramActionContext): Promise<TelegramActor | null> {
     const actor = getActor(ctx);
     if (!actor) {
       await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return null;
+    }
+
+    return actor;
+  }
+
+  async function sendActionMenu(ctx: TelegramActionContext): Promise<void> {
+    if (!(await ensureGroupContext(ctx))) {
       return;
     }
 
+    const actor = await requireActor(ctx);
+    if (!actor) {
+      return;
+    }
+
+    await replyToCommand(ctx, "Меню budka-psn-bot", {
+      reply_markup: buildActionMenu(actor.id)
+    });
+  }
+
+  async function setPendingAction(
+    ctx: TelegramActionContext,
+    actor: TelegramActor,
+    action: PendingTelegramAction
+  ): Promise<void> {
+    await repository.setPendingAction(ctx.chat.id, actor.id, action);
+
+    const hints: Record<PendingTelegramAction, string> = {
+      link: "Пришли PSN Online ID, который нужно привязать.",
+      summary_psn: "Пришли @telegram участника чата или PSN Online ID. Для своей сводки можно просто нажать «Моя сводка».",
+      default: "Пришли PSN Online ID из твоих привязок, который сделать default.",
+      unlink: "Пришли PSN Online ID для удаления или /cancel, если передумал."
+    };
+
+    await replyToCommand(ctx, `${PENDING_ACTION_LABELS[action]}\n${hints[action]}\n\nОтмена: /cancel`);
+  }
+
+  async function handleLink(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string): Promise<void> {
     const existingOwner = await repository.getAccountOwner(ctx.chat.id, onlineId);
     if (existingOwner && existingOwner.userId !== actor.id) {
       await replyToCommand(
@@ -571,23 +672,12 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const message = formatPsnError(error, onlineId);
       await replyToCommand(ctx, `Не получилось привязать профиль: ${message}`);
     }
-  });
+  }
 
-  bot.command("me", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
-      return;
-    }
-
+  async function handleMe(ctx: TelegramActionContext, actor: TelegramActor): Promise<void> {
     const accounts = await repository.listAccountsByUser(ctx.chat.id, actor.id);
     if (accounts.length === 0) {
-      await replyToCommand(ctx, "У тебя пока нет привязок. Используй /link <online-id>.");
+      await replyToCommand(ctx, "У тебя пока нет привязок. Используй /link <online-id> или /menu.");
       return;
     }
 
@@ -602,17 +692,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       ctx,
       `Твои аккаунты: ${accounts.map((account) => account.psnOnlineId).join(", ")}`
     );
-  });
+  }
 
-  bot.command("summary", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    const targetArg = getCommandArg(ctx.message?.text);
-
+  async function handleSummary(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
         const summary = await psnService.getSummaryByOnlineId(targetArg);
@@ -656,7 +738,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ctx,
         targetArg
           ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id>."
+          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
       );
       return;
     }
@@ -685,26 +767,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const message = formatPsnError(error);
       await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
     }
-  });
+  }
 
-  bot.command("default", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
-      return;
-    }
-
-    const onlineId = getCommandArg(ctx.message?.text);
-    if (!onlineId) {
-      await replyToCommand(ctx, "Укажи PSN Online ID: /default your-online-id");
-      return;
-    }
-
+  async function handleDefault(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string): Promise<void> {
     const accounts = await repository.listAccountsByUser(ctx.chat.id, actor.id);
     const match = accounts.find((account) => account.psnOnlineId.toLowerCase() === onlineId.toLowerCase());
 
@@ -715,16 +780,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     await repository.setDefaultAccount(ctx.chat.id, actor.id, match.psnOnlineId);
     await replyToCommand(ctx, `Приоритетный аккаунт для summary: ${match.psnOnlineId}`);
-  });
+  }
 
-  bot.command("region", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    const targetArg = getCommandArg(ctx.message?.text);
+  async function handleRegion(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
     const targetUser = await resolveTargetUser(ctx.chat.id, actor, targetArg);
 
     if (!targetUser) {
@@ -732,7 +790,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ctx,
         targetArg
           ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id>."
+          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
       );
       return;
     }
@@ -748,16 +806,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const message = formatPsnError(error);
       await replyToCommand(ctx, `Не получилось получить регион: ${message}`);
     }
-  });
+  }
 
-  bot.command("plats", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    const targetArg = getCommandArg(ctx.message?.text);
+  async function handlePlats(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
     const targetUser = await resolveTargetUser(ctx.chat.id, actor, targetArg);
 
     if (!targetUser) {
@@ -765,7 +816,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ctx,
         targetArg
           ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id>."
+          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
       );
       return;
     }
@@ -876,21 +927,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const message = formatPsnError(error);
       await replyToCommand(ctx, `Не получилось получить платины: ${message}`);
     }
-  });
+  }
 
-  bot.command("unlink", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const actor = getActor(ctx);
-    if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
-      return;
-    }
-
-    const onlineId = getCommandArg(ctx.message?.text);
+  async function handleUnlink(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string | null): Promise<void> {
     const deleted = await repository.deleteLinks(ctx.chat.id, actor.id, onlineId ?? undefined);
 
     if (deleted === 0) {
@@ -909,15 +948,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ? `Удалил привязку ${onlineId}.`
         : `Удалил все твои привязки (${deleted}).`
     );
-  });
+  }
 
-  bot.command("popular", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
-    const commandArgs = getCommandArgs(ctx.message?.text);
+  async function handlePopular(ctx: TelegramActionContext, commandArgs: string[] = []): Promise<void> {
     const isDebug = commandArgs[0]?.toLowerCase() === "debug";
     const debugSearch = isDebug ? commandArgs.slice(1).join(" ").trim() : "";
     const normalizedDebugSearch = normalizeSearchText(debugSearch);
@@ -1163,14 +1196,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     ];
 
     await replyToCommand(ctx, lines.join("\n"));
-  });
+  }
 
-  bot.command("table", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
+  async function handleTable(ctx: TelegramActionContext): Promise<void> {
     const users = await repository.listUsers(ctx.chat.id);
     if (users.length === 0) {
       await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
@@ -1224,6 +1252,320 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const message =
         error instanceof Error ? formatPsnError(error) : "Не удалось получить данные части профилей.";
       await replyToCommand(ctx, `Не получилось собрать таблицу: ${message}`);
+    }
+  }
+
+  async function sendHelp(ctx: TelegramActionContext) {
+    const actor = getActor(ctx);
+    const canShowMenu = actor && ensureGroup(ctx.chat.type);
+
+    await replyToCommand(
+      ctx,
+      [
+        "Я бот для привязки участников чата к нескольким PSN-аккаунтам.",
+        "",
+        "Основной вход: /menu",
+        "В меню есть кнопки для сводки, таблицы, популярных игр, платин, регионов и действий с PSN ID.",
+        "",
+        "Быстрые команды остаются доступны:",
+        "/menu — открыть персональное меню",
+        "/link <online-id> — добавить PSN-аккаунт к себе",
+        "/me — показать свои привязанные аккаунты",
+        "/summary [@telegram] — суммарная сводка по игроку",
+        "/summary <psn-id> — сводка напрямую из PSN",
+        "/default <online-id> — выбрать приоритетный аккаунт для summary",
+        "/region [@telegram] — регионы аккаунтов игрока",
+        "/table — общая таблица игроков группы",
+        "/plats [@telegram] — список платин игрока по всем аккаунтам",
+        "/popular — топ-5 игр по числу участников чата",
+        "/popular debug [game] — причины пропусков и поиск игровых бакетов",
+        "/unlink [online-id] — удалить один аккаунт или все свои привязки",
+        "/cancel — отменить ввод PSN ID после кнопки меню",
+        "/help — показать эту справку"
+      ].join("\n"),
+      canShowMenu
+        ? {
+            reply_markup: buildActionMenu(actor.id)
+          }
+        : undefined
+    );
+  }
+
+  bot.use(async (ctx, next) => {
+    const text = ctx.message?.text?.trim();
+    if (text?.startsWith("/") && !text.startsWith("/cancel") && ctx.chat && ensureGroup(ctx.chat.type) && ctx.from) {
+      await repository.clearPendingAction(ctx.chat.id, ctx.from.id);
+    }
+
+    await next();
+  });
+
+  bot.command("start", async (ctx) => {
+    await sendHelp(ctx);
+  });
+
+  bot.command("help", async (ctx) => {
+    await sendHelp(ctx);
+  });
+
+  bot.command("menu", async (ctx) => {
+    await sendActionMenu(ctx);
+  });
+
+  bot.command("cancel", async (ctx) => {
+    if (!(await ensureGroupContext(ctx))) {
+      return;
+    }
+
+    const actor = await requireActor(ctx);
+    if (!actor) {
+      return;
+    }
+
+    await repository.clearPendingAction(ctx.chat.id, actor.id);
+    await replyToCommand(ctx, "Ок, отменил ожидаемое действие.");
+  });
+
+  bot.command("link", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const onlineId = getCommandArg(ctx.message?.text);
+    if (!onlineId) {
+      await replyToCommand(ctx, "Укажи PSN Online ID: /link your-online-id");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return;
+    }
+
+    await handleLink(ctx, actor, onlineId);
+  });
+
+  bot.command("me", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return;
+    }
+
+    await handleMe(ctx, actor);
+  });
+
+  bot.command("summary", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    const targetArg = getCommandArg(ctx.message?.text);
+
+    await handleSummary(ctx, actor, targetArg);
+  });
+
+  bot.command("default", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return;
+    }
+
+    const onlineId = getCommandArg(ctx.message?.text);
+    if (!onlineId) {
+      await replyToCommand(ctx, "Укажи PSN Online ID: /default your-online-id");
+      return;
+    }
+
+    await handleDefault(ctx, actor, onlineId);
+  });
+
+  bot.command("region", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    const targetArg = getCommandArg(ctx.message?.text);
+    await handleRegion(ctx, actor, targetArg);
+  });
+
+  bot.command("plats", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    const targetArg = getCommandArg(ctx.message?.text);
+    await handlePlats(ctx, actor, targetArg);
+  });
+
+  bot.command("unlink", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return;
+    }
+
+    await handleUnlink(ctx, actor, getCommandArg(ctx.message?.text));
+  });
+
+  bot.command("popular", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    await handlePopular(ctx, getCommandArgs(ctx.message?.text));
+  });
+
+  bot.command("table", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    await handleTable(ctx);
+  });
+
+  bot.callbackQuery(/^menu:/, async (ctx) => {
+    const callback = parseMenuCallbackData(ctx.callbackQuery.data);
+    if (!callback) {
+      await ctx.answerCallbackQuery({
+        text: "Неизвестное действие меню."
+      });
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await ctx.answerCallbackQuery({
+        text: "Не удалось определить отправителя."
+      });
+      return;
+    }
+
+    if (actor.id !== callback.ownerId) {
+      await ctx.answerCallbackQuery({
+        text: "Это меню другого участника. Отправь /menu"
+      });
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+
+    if (callback.action === "close") {
+      try {
+        await ctx.deleteMessage();
+      } catch {
+        try {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        } catch {
+          await replyToCommand(ctx, "Меню закрыто.");
+        }
+      }
+      return;
+    }
+
+    if (!ctx.chat || !ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const actionCtx = ctx as unknown as TelegramActionContext;
+
+    switch (callback.action) {
+      case "summary":
+        await handleSummary(actionCtx, actor, null);
+        return;
+      case "me":
+        await handleMe(actionCtx, actor);
+        return;
+      case "table":
+        await handleTable(actionCtx);
+        return;
+      case "popular":
+        await handlePopular(actionCtx);
+        return;
+      case "plats":
+        await handlePlats(actionCtx, actor, null);
+        return;
+      case "region":
+        await handleRegion(actionCtx, actor, null);
+        return;
+      case "link":
+      case "default":
+      case "summary_psn":
+      case "unlink":
+        await setPendingAction(actionCtx, actor, callback.action);
+        return;
+    }
+  });
+
+  bot.on("message:text", async (ctx) => {
+    const text = ctx.message.text.trim();
+
+    if (text.startsWith("/")) {
+      return;
+    }
+
+    if (!ensureGroup(ctx.chat.type)) {
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      return;
+    }
+
+    const pending = await repository.getPendingAction(ctx.chat.id, actor.id);
+    if (!pending) {
+      return;
+    }
+
+    if (Date.parse(pending.expires_at) <= Date.now()) {
+      await repository.clearPendingAction(ctx.chat.id, actor.id);
+      await replyToCommand(ctx, "Ожидаемое действие истекло. Открой /menu и попробуй ещё раз.");
+      return;
+    }
+
+    await repository.clearPendingAction(ctx.chat.id, actor.id);
+
+    switch (pending.action) {
+      case "link":
+        await handleLink(ctx, actor, text);
+        return;
+      case "summary_psn":
+        await handleSummary(ctx, actor, text);
+        return;
+      case "default":
+        await handleDefault(ctx, actor, text);
+        return;
+      case "unlink":
+        await handleUnlink(ctx, actor, text);
+        return;
     }
   });
 
