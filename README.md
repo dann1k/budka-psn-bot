@@ -5,7 +5,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - Telegram присылает updates через webhook в Supabase Edge Function;
 - постоянные данные лежат в Supabase Postgres;
 - runtime-секреты хранятся в Supabase secrets;
-- GitHub Actions деплоит миграции, Edge Function и Telegram webhook при каждом push в `main`;
+- GitHub Actions деплоит Edge Function, Supabase secrets и Telegram webhook при каждом push в `main`;
 - локальная SQLite-база больше не используется ботом, только как источник одноразовой миграции.
 
 ## Архитектура
@@ -40,7 +40,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 
 ## Supabase база данных
 
-Актуальная схема создаётся миграцией `supabase/migrations/20260515000000_create_bot_tables.sql`.
+Актуальная схема лежит в `supabase/migrations/20260515000000_create_bot_tables.sql`. GitHub Actions не применяет миграции автоматически, чтобы не хранить пароль Postgres-базы в GitHub secrets. Перед первым деплоем или после изменения схемы нужно вручную выполнить SQL из этого файла в Supabase Dashboard -> SQL Editor.
 
 - `linked_accounts` хранит связи `chat_id + user_id -> psn_online_id`.
 - `user_preferences` хранит выбранный `default_psn_online_id`.
@@ -76,29 +76,37 @@ GitHub Actions secrets:
 ```env
 SUPABASE_ACCESS_TOKEN=...
 SUPABASE_PROJECT_REF=...
-SUPABASE_DB_PASSWORD=...
 BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
 BUDKA_PSN_SUPABASE_SECRET_KEY=...
 ```
 
-`SUPABASE_DB_PASSWORD` — пароль Postgres-базы проекта Supabase. Workflow использует его для `supabase link --project-ref "$SUPABASE_PROJECT_REF"` и затем применяет миграции через `supabase db push --linked`, поэтому вручную собирать `SUPABASE_DB_URL` не нужно.
-
 `BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET` передаётся в Telegram `setWebhook.secret_token`; Edge Function проверяет header `X-Telegram-Bot-Api-Secret-Token`.
+
+Пароль Postgres-базы (`SUPABASE_DB_PASSWORD`) и connection string (`SUPABASE_DB_URL`) в GitHub secrets не нужны. Миграции базы применяются вручную через SQL Editor.
 
 ## Деплой
 
 На каждый push в `main` workflow делает:
 
 1. `deno check supabase/functions/telegram-webhook/index.ts`;
-2. `supabase link --project-ref "$SUPABASE_PROJECT_REF"`;
-3. `supabase db push --linked`;
-4. `supabase secrets set ... --project-ref "$SUPABASE_PROJECT_REF"`;
-5. `supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF"`;
-6. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook`.
+2. `supabase secrets set ... --project-ref "$SUPABASE_PROJECT_REF"`;
+3. `supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF"`;
+4. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook`.
 
 Перед первым деплоем нужно создать Supabase project и заполнить GitHub Actions secrets.
+
+## Ручная миграция схемы
+
+Перед первым запуском бота:
+
+1. Открыть Supabase Dashboard -> SQL Editor.
+2. Скопировать SQL из `supabase/migrations/20260515000000_create_bot_tables.sql`.
+3. Выполнить его в проекте `xaludajhgvsjchotjrhd`.
+4. Проверить, что появились таблицы `linked_accounts` и `user_preferences`.
+
+Эта миграция идемпотентная: в ней используются `if not exists`, поэтому повторный запуск не должен пересоздать таблицы.
 
 ## Локальная проверка
 
