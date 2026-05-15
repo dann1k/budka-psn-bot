@@ -12,7 +12,8 @@ import {
   PsnPrivateProfileError,
   PsnService,
   type PsnPlayedGame,
-  type PsnSummary
+  type PsnSummary,
+  type PsnTrophyTitleGameSource
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
 
@@ -45,6 +46,15 @@ type PopularGameAccumulator = {
   key: string;
   name: string;
   players: Map<number, string>;
+  accounts: PopularDebugAccount[];
+};
+
+type PopularDebugAccount = {
+  telegramLabel: string;
+  psnOnlineId: string;
+  resolvedOnlineId: string;
+  accountId: string;
+  titleCount: number;
 };
 
 type PopularSkippedAccount = {
@@ -270,6 +280,32 @@ function formatParticipantList(labels: string[], limit = 6): string {
   }
 
   return `${labels.slice(0, limit).join(", ")} и ещё ${labels.length - limit}`;
+}
+
+function getPopularDebugAccountKey(account: Pick<PopularDebugAccount, "psnOnlineId" | "accountId">): string {
+  return `${account.psnOnlineId.toLocaleLowerCase("ru-RU")}:${account.accountId}`;
+}
+
+function formatPopularDebugAccount(account: PopularDebugAccount): string {
+  const resolvedSuffix =
+    account.resolvedOnlineId.toLocaleLowerCase("ru-RU") === account.psnOnlineId.toLocaleLowerCase("ru-RU")
+      ? ""
+      : ` -> ${account.resolvedOnlineId}`;
+
+  return `${account.telegramLabel} / ${account.psnOnlineId}${resolvedSuffix} -> ${account.accountId} (${account.titleCount} titles)`;
+}
+
+function formatPopularDebugAccountList(accounts: PopularDebugAccount[], limit = 6): string {
+  const formatted = accounts
+    .slice(0, limit)
+    .map(formatPopularDebugAccount)
+    .join("; ");
+
+  if (accounts.length <= limit) {
+    return formatted;
+  }
+
+  return `${formatted}; и ещё ${accounts.length - limit}`;
 }
 
 function getErrorStatus(error: unknown): number | null {
@@ -911,10 +947,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     const results = await mapWithConcurrency(accountJobs, 3, async (job) => {
       try {
+        const source = await psnService.getTrophyTitleGamesByOnlineId(job.psnOnlineId);
+
         return {
           user: job.user,
           psnOnlineId: job.psnOnlineId,
-          games: await psnService.getPlayedGamesByOnlineId(job.psnOnlineId),
+          source,
+          games: source.games,
           skipped: null as PopularSkippedAccount | null
         };
       } catch (error) {
@@ -922,6 +961,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return {
           user: job.user,
           psnOnlineId: job.psnOnlineId,
+          source: null as PsnTrophyTitleGameSource | null,
           games: [] as PsnPlayedGame[],
           skipped: {
             psnOnlineId: job.psnOnlineId,
@@ -933,6 +973,18 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     });
 
     const skippedAccounts = results.flatMap((result) => result.skipped ? [result.skipped] : []);
+    const loadedAccounts = results.flatMap((result) => result.source
+      ? [
+          {
+            telegramLabel: formatNonMentionTelegramLabel(result.user),
+            psnOnlineId: result.psnOnlineId,
+            resolvedOnlineId: result.source.resolvedOnlineId,
+            accountId: result.source.accountId,
+            titleCount: result.source.titleCount
+          }
+        ]
+      : []);
+    const accountHitsByGame = new Map<string, PopularDebugAccount[]>();
     const gamesByUser = new Map<number, {
       user: LinkedUser;
       games: Map<string, PsnPlayedGame>;
@@ -947,12 +999,27 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         user: result.user,
         games: new Map<string, PsnPlayedGame>()
       };
+      const debugAccount = result.source
+        ? {
+            telegramLabel: formatNonMentionTelegramLabel(result.user),
+            psnOnlineId: result.psnOnlineId,
+            resolvedOnlineId: result.source.resolvedOnlineId,
+            accountId: result.source.accountId,
+            titleCount: result.source.titleCount
+          }
+        : null;
 
       for (const game of result.games) {
         const existingGame = existingUserGames.games.get(game.key);
 
         if (!existingGame || parseDateMs(game.lastPlayedAt) > parseDateMs(existingGame.lastPlayedAt)) {
           existingUserGames.games.set(game.key, game);
+        }
+
+        if (debugAccount) {
+          const hits = accountHitsByGame.get(game.key) ?? [];
+          hits.push(debugAccount);
+          accountHitsByGame.set(game.key, hits);
         }
       }
 
@@ -966,10 +1033,12 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const existing = popularGames.get(game.key) ?? {
           key: game.key,
           name: game.name,
-          players: new Map<number, string>()
+          players: new Map<number, string>(),
+          accounts: accountHitsByGame.get(game.key) ?? []
         };
 
         existing.name = game.name;
+        existing.accounts = accountHitsByGame.get(game.key) ?? existing.accounts;
         existing.players.set(user.userId, formatNonMentionTelegramLabel(user));
         popularGames.set(game.key, existing);
       }
@@ -1016,6 +1085,14 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             return a.name.localeCompare(b.name, "ru-RU");
           })
       : [];
+    const debugMatchedAccountKeys = new Set(
+      matchingDebugGames.flatMap((game) =>
+        game.accounts.map((account) => getPopularDebugAccountKey(account))
+      )
+    );
+    const debugAccountsWithoutMatch = normalizedDebugSearch
+      ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
+      : [];
 
     const lines = [
       "Популярные игры чата",
@@ -1035,21 +1112,42 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ? [
             "",
             `Debug по игре: ${debugSearch}`,
+            `Проверено аккаунтов: ${loadedAccounts.length}, с совпадениями: ${debugMatchedAccountKeys.size}`,
             ...(matchingDebugGames.length > 0
               ? matchingDebugGames
                   .slice(0, 20)
-                  .map((game) => {
+                  .flatMap((game) => {
                     const players = [...game.players.values()]
                       .sort((a, b) => a.localeCompare(b, "ru-RU"));
+                    const accounts = [...game.accounts]
+                      .sort((a, b) => formatPopularDebugAccount(a).localeCompare(
+                        formatPopularDebugAccount(b),
+                        "ru-RU"
+                      ));
 
-                    return `- ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
-                      "участник",
-                      "участника",
-                      "участников"
-                    ])}: ${formatParticipantList(players)}`;
+                    return [
+                      `- ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
+                        "участник",
+                        "участника",
+                        "участников"
+                      ])}: ${formatParticipantList(players)}`,
+                      `  аккаунты: ${formatPopularDebugAccountList(accounts)}`
+                    ];
                   })
               : ["Совпадений не найдено."]),
-            ...(matchingDebugGames.length > 20 ? [`...и ещё ${matchingDebugGames.length - 20}`] : [])
+            ...(matchingDebugGames.length > 20 ? [`...и ещё ${matchingDebugGames.length - 20}`] : []),
+            ...(debugAccountsWithoutMatch.length > 0
+              ? [
+                  "",
+                  "Проверенные аккаунты без совпадений:",
+                  ...debugAccountsWithoutMatch
+                    .slice(0, 10)
+                    .map((account) => `- ${formatPopularDebugAccount(account)}`),
+                  ...(debugAccountsWithoutMatch.length > 10
+                    ? [`...и ещё ${debugAccountsWithoutMatch.length - 10}`]
+                    : [])
+                ]
+              : [])
           ]
         : []),
       ...(isDebug && skippedAccounts.length > 0

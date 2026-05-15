@@ -7,7 +7,8 @@
   "scripts": {
     "check": "node scripts/deno-check.mjs",
     "migrate:dry-run": "node scripts/migrate-sqlite-to-supabase.mjs",
-    "migrate:apply": "node scripts/migrate-sqlite-to-supabase.mjs --apply"
+    "migrate:apply": "node scripts/migrate-sqlite-to-supabase.mjs --apply",
+    "psn:token": "node scripts/print-psn-access-token.mjs"
   },
   "engines": {
     "node": ">=22"

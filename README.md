@@ -147,6 +147,14 @@ Health-check:
 curl http://127.0.0.1:54321/functions/v1/telegram-webhook
 ```
 
+Получить временный PSN access token для ручного curl-дебага:
+
+```bash
+npm run psn:token -- --env-file=supabase/functions/.env.local --print-token
+```
+
+Скрипт использует `BUDKA_PSN_NPSSO`, печатает срок жизни токена и выводит access token только с явным флагом `--print-token`.
+
 ## Перенос старой SQLite-базы
 
 Скрипт читает `data/bot.sqlite` и импортирует строки в Supabase через REST/secret key.
@@ -194,7 +202,7 @@ node scripts/migrate-sqlite-to-supabase.mjs --sqlite=data/bot.sqlite --env-file=
 - Для привязанного игрока `level` и трофеи суммируются по всем аккаунтам, `progress` берётся как максимум.
 - Приоритет подробной карточки: `/default`, затем первый non-RU аккаунт, затем первый добавленный.
 - `/popular` временно строится по PSN trophy titles (`getUserTitles`), чтобы видеть старые игры из trophy list. Игра группируется по `npServiceName + npCommunicationId`; один Telegram-участник считается один раз, даже если игра есть на нескольких его PSN-аккаунтах. Рейтинг сортируется по числу участников, затем по названию игры.
-- В `/popular` участники выводятся без `@`, чтобы не отправлять им Telegram-уведомления; `/popular debug` дополнительно показывает до 10 пропущенных аккаунтов и краткую причину, а `/popular debug uncharted` показывает все найденные игровые бакеты по строке поиска.
+- В `/popular` участники выводятся без `@`, чтобы не отправлять им Telegram-уведомления; `/popular debug` дополнительно показывает до 10 пропущенных аккаунтов и краткую причину. `/popular debug uncharted` показывает найденные игровые бакеты по строке поиска, PSN-аккаунты, из которых они пришли, resolved `accountId`, число загруженных trophy titles и проверенные аккаунты без совпадений.
 
 ## Что не коммитить
 

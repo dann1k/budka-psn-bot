@@ -52,6 +52,14 @@ export type PsnPlayedGame = {
   lastPlayedAt: string | null;
 };
 
+export type PsnTrophyTitleGameSource = {
+  requestedOnlineId: string;
+  resolvedOnlineId: string;
+  accountId: string;
+  titleCount: number;
+  games: PsnPlayedGame[];
+};
+
 function normalizeTrophies(
   trophies:
     | {
@@ -243,10 +251,11 @@ export class PsnService {
     });
   }
 
-  async getPlayedGamesByOnlineId(onlineId: string): Promise<PsnPlayedGame[]> {
+  async getTrophyTitleGamesByOnlineId(onlineId: string): Promise<PsnTrophyTitleGameSource> {
     return await this.withAuthRetry(async (accessToken) => {
       const profile = await this.getProfile(accessToken, onlineId);
       const games = new Map<string, PsnPlayedGame>();
+      let titleCount = 0;
       let offset = 0;
 
       while (true) {
@@ -255,6 +264,8 @@ export class PsnService {
           profile.accountId,
           { limit: 800, offset }
         );
+
+        titleCount += page.trophyTitles.length;
 
         for (const title of page.trophyTitles) {
           const name = title.trophyTitleName;
@@ -289,8 +300,18 @@ export class PsnService {
         offset = page.nextOffset;
       }
 
-      return [...games.values()];
+      return {
+        requestedOnlineId: onlineId,
+        resolvedOnlineId: profile.onlineId ?? onlineId,
+        accountId: profile.accountId,
+        titleCount,
+        games: [...games.values()]
+      };
     });
+  }
+
+  async getPlayedGamesByOnlineId(onlineId: string): Promise<PsnPlayedGame[]> {
+    return (await this.getTrophyTitleGamesByOnlineId(onlineId)).games;
   }
 
   private async getProfile(accessToken: string, onlineId: string) {
