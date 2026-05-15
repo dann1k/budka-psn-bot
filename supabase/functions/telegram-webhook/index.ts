@@ -1,12 +1,14 @@
 import { webhookCallback } from "npm:grammy@1.41.1/web";
 import { createBot } from "./bot.ts";
 import { getConfig } from "./config.ts";
+import { PsnAuthStore } from "./psn-auth-store.ts";
 import { PsnService } from "./psn.ts";
 import { LinkRepository } from "./repository.ts";
 
 const config = getConfig();
 const repository = new LinkRepository(config.supabaseUrl, config.supabaseSecretKey);
-const psnService = new PsnService(config.psnNpsso);
+const psnAuthStore = new PsnAuthStore(config.supabaseUrl, config.supabaseSecretKey, config.psnAuthEncryptionKey);
+const psnService = new PsnService(config.psnNpsso, psnAuthStore);
 const bot = createBot(config, repository, psnService);
 const handleTelegramWebhook = webhookCallback(bot, "std/http", {
   secretToken: config.telegramWebhookSecret,

@@ -13,7 +13,8 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `supabase/functions/telegram-webhook/index.ts` — HTTP entrypoint Edge Function: `GET` health-check, `POST` Telegram webhook, остальные методы `405`.
 - `supabase/functions/telegram-webhook/bot.ts` — команды Telegram и бизнес-логика.
 - `supabase/functions/telegram-webhook/repository.ts` — доступ к Supabase Postgres через secret key.
-- `supabase/functions/telegram-webhook/psn.ts` — PSN API, авторизация через `BUDKA_PSN_NPSSO`, summary, presence, список платин.
+- `supabase/functions/telegram-webhook/psn.ts` — PSN API, persistent auth через refresh token, summary, presence, список платин.
+- `supabase/functions/telegram-webhook/psn-auth-store.ts` — зашифрованное хранение PSN access/refresh tokens в Supabase.
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
 - `supabase/migrations/` — схема Postgres.
@@ -40,10 +41,11 @@ Telegram-бот для групповых чатов с PSN-статистико
 
 ## Supabase база данных
 
-Актуальная схема лежит в `supabase/migrations/20260515000000_create_bot_tables.sql`. GitHub Actions не применяет миграции автоматически, чтобы не хранить пароль Postgres-базы в GitHub secrets. Перед первым деплоем или после изменения схемы нужно вручную выполнить SQL из этого файла в Supabase Dashboard -> SQL Editor.
+Актуальная схема лежит в `supabase/migrations/`. GitHub Actions не применяет миграции автоматически, чтобы не хранить пароль Postgres-базы в GitHub secrets. Перед первым деплоем или после изменения схемы нужно вручную выполнить SQL из нужных файлов в Supabase Dashboard -> SQL Editor.
 
 - `linked_accounts` хранит связи `chat_id + user_id -> psn_online_id`.
 - `user_preferences` хранит выбранный `default_psn_online_id`.
+- `psn_auth_state` хранит один глобальный зашифрованный PSN auth state бота.
 - `chat_id` и `user_id` — `bigint`.
 - `linked_at` — `timestamptz`.
 - Для case-insensitive поиска есть generated columns:
@@ -53,6 +55,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - Уникальность PSN внутри группы: unique index `(chat_id, psn_online_id_normalized)`.
 - RLS включён, public policies не создаются. Edge Function работает через `BUDKA_PSN_SUPABASE_SECRET_KEY`.
 - Foreign keys между `user_preferences` и `linked_accounts` намеренно не добавлены, чтобы сохранить текущее поведение default-аккаунта.
+- В `psn_auth_state` access/refresh tokens хранятся в формате `v1:<iv-base64>:<ciphertext-base64>` и шифруются AES-GCM ключом `BUDKA_PSN_AUTH_ENCRYPTION_KEY`.
 
 ## Секреты
 
@@ -63,11 +66,18 @@ BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
 BUDKA_PSN_SUPABASE_SECRET_KEY=...
+BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 ```
 
 `SUPABASE_URL` Supabase предоставляет Edge Function автоматически.
 
 `BUDKA_PSN_SUPABASE_SECRET_KEY` — это Supabase `Secret key` из Settings -> API Keys. В новом интерфейсе он заменяет legacy `service_role` key и нужен только backend-коду.
+
+`BUDKA_PSN_AUTH_ENCRYPTION_KEY` — base64-encoded 32-byte ключ для AES-GCM шифрования PSN токенов. Сгенерировать:
+
+```bash
+openssl rand -base64 32
+```
 
 Не использовать generic `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`: в общем Supabase project они могут принадлежать другим функциям. Для этого бота все runtime-секреты namespaced через `BUDKA_PSN_*`.
 
@@ -80,6 +90,7 @@ BUDKA_PSN_TELEGRAM_BOT_TOKEN=...
 BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=...
 BUDKA_PSN_NPSSO=...
 BUDKA_PSN_SUPABASE_SECRET_KEY=...
+BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 ```
 
 `BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET` передаётся в Telegram `setWebhook.secret_token`; Edge Function проверяет header `X-Telegram-Bot-Api-Secret-Token`.
@@ -102,11 +113,13 @@ BUDKA_PSN_SUPABASE_SECRET_KEY=...
 Перед первым запуском бота:
 
 1. Открыть Supabase Dashboard -> SQL Editor.
-2. Скопировать SQL из `supabase/migrations/20260515000000_create_bot_tables.sql`.
-3. Выполнить его в проекте `xaludajhgvsjchotjrhd`.
-4. Проверить, что появились таблицы `linked_accounts` и `user_preferences`.
+2. Скопировать и выполнить SQL из `supabase/migrations/20260515000000_create_bot_tables.sql`.
+3. Скопировать и выполнить SQL из `supabase/migrations/20260515010000_create_psn_auth_state.sql`.
+4. Проверить, что появились таблицы `linked_accounts`, `user_preferences` и `psn_auth_state`.
 
-Эта миграция идемпотентная: в ней используются `if not exists`, поэтому повторный запуск не должен пересоздать таблицы.
+Эти миграции идемпотентные: в них используются `if not exists`, поэтому повторный запуск не должен пересоздать таблицы.
+
+Если таблицы `linked_accounts` и `user_preferences` уже созданы, достаточно выполнить только `20260515010000_create_psn_auth_state.sql`.
 
 ## Локальная проверка
 
@@ -163,9 +176,14 @@ node scripts/migrate-sqlite-to-supabase.mjs --sqlite=data/bot.sqlite --env-file=
 - `--apply` делает upsert в `linked_accounts` и `user_preferences`;
 - после успешного переноса локальная SQLite-база больше не нужна runtime-боту.
 
-## PSN и summary
+## PSN auth и summary
 
-- `BUDKA_PSN_NPSSO` обменивается на access/refresh tokens, токены кэшируются в памяти Edge Function instance.
+- Первый успешный PSN auth через `BUDKA_PSN_NPSSO` сохраняет access/refresh tokens в `psn_auth_state`.
+- Access/refresh tokens шифруются через `BUDKA_PSN_AUTH_ENCRYPTION_KEY`; plaintext не хранится в базе.
+- Перед PSN-запросами бот использует in-memory auth cache, затем persisted auth state из Supabase.
+- Access token обновляется через refresh token за 5 минут до истечения.
+- Если PSN вернул auth-ошибку, бот один раз принудительно обновляет auth и повторяет исходный запрос.
+- `BUDKA_PSN_NPSSO` остаётся emergency fallback, если persisted refresh token отсутствует или невалиден.
 - Summary получает профиль, shareable URL, trophy summary, регион, presence, последние игры и avatar URL.
 - Закрытые профили без публичных trophy-данных не привязываются.
 - Presence и recent games деградируют мягко: при ошибке presence становится `offline`, последние игры — пустым списком.

@@ -6,6 +6,7 @@ type AppConfig = {
   psnNpsso: string;
   supabaseUrl: string;
   supabaseSecretKey: string;
+  psnAuthEncryptionKey: string;
   emojis: typeof emojis;
 };
 
@@ -26,6 +27,7 @@ export function getConfig(): AppConfig {
     psnNpsso: readRequired("BUDKA_PSN_NPSSO"),
     supabaseUrl: readRequired("SUPABASE_URL"),
     supabaseSecretKey: readRequired("BUDKA_PSN_SUPABASE_SECRET_KEY"),
+    psnAuthEncryptionKey: readRequired("BUDKA_PSN_AUTH_ENCRYPTION_KEY"),
     emojis
   };
 }
