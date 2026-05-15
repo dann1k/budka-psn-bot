@@ -44,11 +44,7 @@ type PreferredAccount = {
 type PopularGameAccumulator = {
   key: string;
   name: string;
-  latestPlayedAt: string | null;
-  players: Map<number, {
-    label: string;
-    latestPlayedAt: string | null;
-  }>;
+  players: Map<number, string>;
 };
 
 type PopularSkippedAccount = {
@@ -424,7 +420,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "/region [@telegram] — регионы аккаунтов игрока",
         "/table — общая таблица игроков группы",
         "/plats [@telegram] — список платин игрока по всем аккаунтам",
-        "/popular — топ-3 игры по числу участников чата",
+        "/popular — топ-5 игр по числу участников чата",
         "/popular debug — показать причины пропущенных аккаунтов",
         "/unlink [online-id] — удалить один аккаунт или все свои привязки",
         "/help — показать эту справку"
@@ -955,24 +951,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const existing = popularGames.get(game.key) ?? {
           key: game.key,
           name: game.name,
-          latestPlayedAt: null,
-          players: new Map<number, {
-            label: string;
-            latestPlayedAt: string | null;
-          }>()
+          players: new Map<number, string>()
         };
-        const latestPlayedAt = parseDateMs(game.lastPlayedAt) > parseDateMs(existing.latestPlayedAt)
-          ? game.lastPlayedAt
-          : existing.latestPlayedAt;
 
-        existing.name = parseDateMs(game.lastPlayedAt) >= parseDateMs(existing.latestPlayedAt)
-          ? game.name
-          : existing.name;
-        existing.latestPlayedAt = latestPlayedAt;
-        existing.players.set(user.userId, {
-          label: formatNonMentionTelegramLabel(user),
-          latestPlayedAt: game.lastPlayedAt
-        });
+        existing.name = game.name;
+        existing.players.set(user.userId, formatNonMentionTelegramLabel(user));
         popularGames.set(game.key, existing);
       }
     }
@@ -1004,22 +987,16 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           return b.players.size - a.players.size;
         }
 
-        const latestDiff = parseDateMs(b.latestPlayedAt) - parseDateMs(a.latestPlayedAt);
-        if (latestDiff !== 0) {
-          return latestDiff;
-        }
-
         return a.name.localeCompare(b.name, "ru-RU");
       })
-      .slice(0, 3);
+      .slice(0, 5);
 
     const lines = [
       "Популярные игры чата",
       "",
       ...topGames.map((game, index) => {
         const players = [...game.players.values()]
-          .sort((a, b) => a.label.localeCompare(b.label, "ru-RU"))
-          .map((player) => player.label);
+          .sort((a, b) => a.localeCompare(b, "ru-RU"));
 
         return `${index + 1}. ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
           "участник",

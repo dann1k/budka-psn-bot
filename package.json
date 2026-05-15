@@ -5,7 +5,7 @@
   "description": "Telegram PSN bot deployed as a Supabase Edge Function.",
   "type": "module",
   "scripts": {
-    "check": "npx -y deno check supabase/functions/telegram-webhook/index.ts",
+    "check": "node scripts/deno-check.mjs",
     "migrate:dry-run": "node scripts/migrate-sqlite-to-supabase.mjs",
     "migrate:apply": "node scripts/migrate-sqlite-to-supabase.mjs --apply"
   },
