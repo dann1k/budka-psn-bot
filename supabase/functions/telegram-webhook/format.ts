@@ -1,5 +1,5 @@
-import type { MessageEntity } from "grammy/types";
-import type { EmojiConfig, EmojiToken } from "./config.js";
+import type { MessageEntity } from "npm:grammy@1.41.1/types";
+import type { EmojiConfig, EmojiToken } from "./types.ts";
 
 export type RichMessage = {
   text: string;

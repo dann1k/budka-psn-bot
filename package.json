@@ -2,22 +2,14 @@
   "name": "budka-psn-bot",
   "version": "0.1.0",
   "private": true,
-  "description": "Telegram bot for linking Telegram group members to one or more PSN profiles and posting summaries.",
+  "description": "Telegram PSN bot deployed as a Supabase Edge Function.",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc --noEmit -p tsconfig.json"
+    "check": "npx -y deno check supabase/functions/telegram-webhook/index.ts",
+    "migrate:dry-run": "node scripts/migrate-sqlite-to-supabase.mjs",
+    "migrate:apply": "node scripts/migrate-sqlite-to-supabase.mjs --apply"
   },
-  "dependencies": {
-    "dotenv": "^16.4.7",
-    "grammy": "^1.36.1",
-    "psn-api": "^2.12.0"
-  },
-  "devDependencies": {
-    "@types/node": "^24.5.2",
-    "tsx": "^4.19.3",
-    "typescript": "^5.8.3"
+  "engines": {
+    "node": ">=22"
   }
 }

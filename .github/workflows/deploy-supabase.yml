@@ -1,0 +1,81 @@
+name: Deploy Supabase
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BUDKA_PSN_TELEGRAM_BOT_TOKEN: ${{ secrets.BUDKA_PSN_TELEGRAM_BOT_TOKEN }}
+      BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET: ${{ secrets.BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET }}
+      BUDKA_PSN_NPSSO: ${{ secrets.BUDKA_PSN_NPSSO }}
+      BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Validate required secrets
+        run: |
+          missing=0
+          for name in \
+            SUPABASE_ACCESS_TOKEN \
+            SUPABASE_PROJECT_REF \
+            SUPABASE_DB_URL \
+            BUDKA_PSN_TELEGRAM_BOT_TOKEN \
+            BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET \
+            BUDKA_PSN_NPSSO \
+            BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is not set"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Check Edge Function
+        run: deno check supabase/functions/telegram-webhook/index.ts
+
+      - name: Apply database migrations
+        run: supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Set Supabase Edge Function secrets
+        run: |
+          supabase secrets set \
+            BUDKA_PSN_TELEGRAM_BOT_TOKEN="$BUDKA_PSN_TELEGRAM_BOT_TOKEN" \
+            BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET="$BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET" \
+            BUDKA_PSN_NPSSO="$BUDKA_PSN_NPSSO" \
+            BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY="$BUDKA_PSN_SUPABASE_SERVICE_ROLE_KEY" \
+            --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Deploy Edge Function
+        run: supabase functions deploy telegram-webhook --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --use-api
+
+      - name: Configure Telegram webhook
+        run: |
+          WEBHOOK_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook"
+          PAYLOAD="$(jq -nc \
+            --arg url "$WEBHOOK_URL" \
+            --arg secret "$BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET" \
+            '{url: $url, secret_token: $secret, allowed_updates: ["message"], drop_pending_updates: false}')"
+
+          curl --fail --silent --show-error \
+            --request POST "https://api.telegram.org/bot${BUDKA_PSN_TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD"

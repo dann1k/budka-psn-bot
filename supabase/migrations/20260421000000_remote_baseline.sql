@@ -1,0 +1,3 @@
+-- Remote baseline migration.
+-- This version already exists in the linked Supabase project history.
+-- Keep this no-op file so local migration history matches the remote project.

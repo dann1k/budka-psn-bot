@@ -1,0 +1,6 @@
+{
+  "nodeModulesDir": "auto",
+  "tasks": {
+    "check": "deno check supabase/functions/telegram-webhook/index.ts"
+  }
+}

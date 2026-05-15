@@ -1,11 +1,4 @@
-import { createRequire } from "node:module";
-
-type PsnApiModule = typeof import("psn-api");
-
-const require = createRequire(import.meta.url);
-const psnApiImport = require("psn-api") as PsnApiModule | { default: PsnApiModule };
-const psnApi: PsnApiModule =
-  "default" in psnApiImport ? psnApiImport.default : psnApiImport;
+import * as psnApi from "npm:psn-api@2.18.0";
 
 export type PsnSummary = {
   onlineId: string;
