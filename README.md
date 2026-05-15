@@ -1,4 +1,4 @@
-# psn-telegram-bot
+# budka-psn-bot
 
 Telegram-бот для групповых чатов с привязкой одного или нескольких PSN-аккаунтов к участнику и общей статистикой по трофеям.
 
@@ -96,17 +96,17 @@ npm start
 Сборка образа:
 
 ```bash
-docker build -t psn-telegram-bot .
+docker build -t budka-psn-bot .
 ```
 
 Запуск контейнера:
 
 ```bash
 docker run -d \
-  --name psn-telegram-bot \
+  --name budka-psn-bot \
   --env-file .env \
   -v $(pwd)/data:/app/data \
-  psn-telegram-bot
+  budka-psn-bot
 ```
 
 Что важно:
@@ -126,8 +126,8 @@ docker compose up -d --build
 ## Деплой на сервер
 
 ```bash
-git clone https://github.com/dann1k/psn-telegram-bot.git
-cd psn-telegram-bot
+git clone https://github.com/dann1k/budka-psn-bot.git
+cd budka-psn-bot
 cp .env.example .env
 mkdir -p data
 docker compose up -d --build

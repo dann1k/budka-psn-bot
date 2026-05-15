@@ -1,9 +1,9 @@
 services:
-  psn-telegram-bot:
+  budka-psn-bot:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: psn-telegram-bot
+    container_name: budka-psn-bot
     env_file:
       - .env
     volumes:

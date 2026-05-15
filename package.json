@@ -1,5 +1,5 @@
 {
-  "name": "psn-telegram-bot",
+  "name": "budka-psn-bot",
   "version": "0.1.0",
   "private": true,
   "description": "Telegram bot for linking Telegram group members to one or more PSN profiles and posting summaries.",
