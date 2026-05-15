@@ -71,6 +71,14 @@ function getCommandArg(text: string | undefined): string | null {
   return value.length > 0 ? value : null;
 }
 
+function getCommandArgs(text: string | undefined): string[] {
+  if (!text) {
+    return [];
+  }
+
+  return text.trim().split(/\s+/).slice(1);
+}
+
 function getActor(ctx: {
   from?: { id: number; username?: string; first_name: string; last_name?: string };
 }) {
@@ -235,6 +243,10 @@ async function mapWithConcurrency<TInput, TOutput>(
 
 function parseDateMs(value: string | null | undefined): number {
   return Date.parse(value ?? "") || 0;
+}
+
+function normalizeSearchText(value: string): string {
+  return value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 }
 
 function pluralizeRu(value: number, forms: [string, string, string]): string {
@@ -421,7 +433,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "/table — общая таблица игроков группы",
         "/plats [@telegram] — список платин игрока по всем аккаунтам",
         "/popular — топ-5 игр по числу участников чата",
-        "/popular debug — показать причины пропущенных аккаунтов",
+        "/popular debug [game] — причины пропусков и поиск игровых бакетов",
         "/unlink [online-id] — удалить один аккаунт или все свои привязки",
         "/help — показать эту справку"
       ].join("\n")
@@ -869,7 +881,10 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    const isDebug = getCommandArg(ctx.message?.text)?.toLowerCase() === "debug";
+    const commandArgs = getCommandArgs(ctx.message?.text);
+    const isDebug = commandArgs[0]?.toLowerCase() === "debug";
+    const debugSearch = isDebug ? commandArgs.slice(1).join(" ").trim() : "";
+    const normalizedDebugSearch = normalizeSearchText(debugSearch);
     const users = await repository.listUsers(ctx.chat.id);
     if (users.length === 0) {
       await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
@@ -990,6 +1005,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return a.name.localeCompare(b.name, "ru-RU");
       })
       .slice(0, 5);
+    const matchingDebugGames = normalizedDebugSearch
+      ? [...popularGames.values()]
+          .filter((game) => normalizeSearchText(game.name).includes(normalizedDebugSearch))
+          .sort((a, b) => {
+            if (b.players.size !== a.players.size) {
+              return b.players.size - a.players.size;
+            }
+
+            return a.name.localeCompare(b.name, "ru-RU");
+          })
+      : [];
 
     const lines = [
       "Популярные игры чата",
@@ -1005,6 +1031,27 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ])}: ${formatParticipantList(players)}`;
       }),
       ...(skippedAccounts.length > 0 ? ["", `Пропущено аккаунтов: ${skippedAccounts.length}`] : []),
+      ...(isDebug && debugSearch
+        ? [
+            "",
+            `Debug по игре: ${debugSearch}`,
+            ...(matchingDebugGames.length > 0
+              ? matchingDebugGames
+                  .slice(0, 20)
+                  .map((game) => {
+                    const players = [...game.players.values()]
+                      .sort((a, b) => a.localeCompare(b, "ru-RU"));
+
+                    return `- ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
+                      "участник",
+                      "участника",
+                      "участников"
+                    ])}: ${formatParticipantList(players)}`;
+                  })
+              : ["Совпадений не найдено."]),
+            ...(matchingDebugGames.length > 20 ? [`...и ещё ${matchingDebugGames.length - 20}`] : [])
+          ]
+        : []),
       ...(isDebug && skippedAccounts.length > 0
         ? [
             "",
