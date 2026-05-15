@@ -46,6 +46,12 @@ export type PsnPlatinumTitle = {
   } | null;
 };
 
+export type PsnPlayedGame = {
+  key: string;
+  name: string;
+  lastPlayedAt: string | null;
+};
+
 function normalizeTrophies(
   trophies:
     | {
@@ -77,6 +83,10 @@ function normalizeNumber(value: number | string | undefined, fallback = 0): numb
   }
 
   return fallback;
+}
+
+function normalizeGameName(value: string): string {
+  return value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 }
 
 type AuthState = {
@@ -233,9 +243,67 @@ export class PsnService {
     });
   }
 
-  private async getResolvedProfile(accessToken: string, onlineId: string) {
+  async getPlayedGamesByOnlineId(onlineId: string): Promise<PsnPlayedGame[]> {
+    return await this.withAuthRetry(async (accessToken) => {
+      const profile = await this.getProfile(accessToken, onlineId);
+      const games = new Map<string, PsnPlayedGame>();
+      let offset = 0;
+
+      while (true) {
+        const page = await psnApi.getUserPlayedGames(
+          { accessToken },
+          profile.accountId,
+          {
+            limit: 200,
+            offset,
+            categories: "ps5_native_game,ps4_game,pspc_game,unknown"
+          }
+        );
+
+        for (const title of page.titles) {
+          const name = title.concept?.name || title.localizedName || title.name;
+          const normalizedName = normalizeGameName(name);
+
+          if (!normalizedName) {
+            continue;
+          }
+
+          const key = title.concept?.id !== undefined
+            ? `concept:${title.concept.id}`
+            : `name:${normalizedName}`;
+          const lastPlayedAt = title.lastPlayedDateTime || null;
+          const existing = games.get(key);
+
+          if (
+            !existing ||
+            (Date.parse(lastPlayedAt ?? "") || 0) > (Date.parse(existing.lastPlayedAt ?? "") || 0)
+          ) {
+            games.set(key, {
+              key,
+              name,
+              lastPlayedAt
+            });
+          }
+        }
+
+        if (page.nextOffset === undefined || page.nextOffset <= offset || page.titles.length === 0) {
+          break;
+        }
+
+        offset = page.nextOffset;
+      }
+
+      return [...games.values()];
+    });
+  }
+
+  private async getProfile(accessToken: string, onlineId: string) {
     const profileResponse = await psnApi.getProfileFromUserName({ accessToken }, onlineId);
-    const profile = profileResponse.profile;
+    return profileResponse.profile;
+  }
+
+  private async getResolvedProfile(accessToken: string, onlineId: string) {
+    const profile = await this.getProfile(accessToken, onlineId);
     const shareableLink = await psnApi.getProfileShareableLink({ accessToken }, profile.accountId);
 
     return {

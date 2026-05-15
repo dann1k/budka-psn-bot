@@ -11,6 +11,7 @@ import { LinkRepository } from "./repository.ts";
 import {
   PsnPrivateProfileError,
   PsnService,
+  type PsnPlayedGame,
   type PsnSummary
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
@@ -38,6 +39,16 @@ type AggregatedPlayer = {
 type PreferredAccount = {
   summary: PsnSummary;
   index: number;
+};
+
+type PopularGameAccumulator = {
+  key: string;
+  name: string;
+  latestPlayedAt: string | null;
+  players: Map<number, {
+    label: string;
+    latestPlayedAt: string | null;
+  }>;
 };
 
 function ensureGroup(chatType: string): boolean {
@@ -193,6 +204,56 @@ function isTelegramHandle(value: string | null): boolean {
   return Boolean(value && value.trim().startsWith("@"));
 }
 
+async function mapWithConcurrency<TInput, TOutput>(
+  inputs: TInput[],
+  concurrency: number,
+  worker: (input: TInput) => Promise<TOutput>
+): Promise<TOutput[]> {
+  const results = new Array<TOutput>(inputs.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (nextIndex < inputs.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(inputs[currentIndex]);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, inputs.length) }, () => runWorker())
+  );
+
+  return results;
+}
+
+function parseDateMs(value: string | null | undefined): number {
+  return Date.parse(value ?? "") || 0;
+}
+
+function pluralizeRu(value: number, forms: [string, string, string]): string {
+  const mod10 = value % 10;
+  const mod100 = value % 100;
+
+  if (mod10 === 1 && mod100 !== 11) {
+    return forms[0];
+  }
+
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    return forms[1];
+  }
+
+  return forms[2];
+}
+
+function formatParticipantList(labels: string[], limit = 6): string {
+  if (labels.length <= limit) {
+    return labels.join(", ");
+  }
+
+  return `${labels.slice(0, limit).join(", ")} и ещё ${labels.length - limit}`;
+}
+
 export function createBot(config: BotConfig, repository: LinkRepository, psnService: PsnService): Bot {
   const bot = new Bot(config.botToken);
 
@@ -295,6 +356,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "/region [@telegram] — регионы аккаунтов игрока",
         "/table — общая таблица игроков группы",
         "/plats [@telegram] — список платин игрока по всем аккаунтам",
+        "/popular — топ-3 игры по числу участников чата",
         "/unlink [online-id] — удалить один аккаунт или все свои привязки",
         "/help — показать эту справку"
       ].join("\n")
@@ -734,6 +796,153 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         ? `Удалил привязку ${onlineId}.`
         : `Удалил все твои привязки (${deleted}).`
     );
+  });
+
+  bot.command("popular", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    const users = await repository.listUsers(ctx.chat.id);
+    if (users.length === 0) {
+      await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
+      return;
+    }
+
+    const accountsByUser = await Promise.all(
+      users.map(async (user) => ({
+        user,
+        accounts: await repository.listAccountsByUser(ctx.chat.id, user.userId)
+      }))
+    );
+    const accountJobs = accountsByUser.flatMap(({ user, accounts }) =>
+      accounts.map((account) => ({
+        user,
+        psnOnlineId: account.psnOnlineId
+      }))
+    );
+
+    if (accountJobs.length === 0) {
+      await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
+      return;
+    }
+
+    const results = await mapWithConcurrency(accountJobs, 3, async (job) => {
+      try {
+        return {
+          user: job.user,
+          games: await psnService.getPlayedGamesByOnlineId(job.psnOnlineId),
+          failed: false
+        };
+      } catch {
+        return {
+          user: job.user,
+          games: [] as PsnPlayedGame[],
+          failed: true
+        };
+      }
+    });
+
+    const skippedAccounts = results.filter((result) => result.failed).length;
+    const gamesByUser = new Map<number, {
+      user: LinkedUser;
+      games: Map<string, PsnPlayedGame>;
+    }>();
+
+    for (const result of results) {
+      if (result.failed) {
+        continue;
+      }
+
+      const existingUserGames = gamesByUser.get(result.user.userId) ?? {
+        user: result.user,
+        games: new Map<string, PsnPlayedGame>()
+      };
+
+      for (const game of result.games) {
+        const existingGame = existingUserGames.games.get(game.key);
+
+        if (!existingGame || parseDateMs(game.lastPlayedAt) > parseDateMs(existingGame.lastPlayedAt)) {
+          existingUserGames.games.set(game.key, game);
+        }
+      }
+
+      gamesByUser.set(result.user.userId, existingUserGames);
+    }
+
+    const popularGames = new Map<string, PopularGameAccumulator>();
+
+    for (const { user, games } of gamesByUser.values()) {
+      for (const game of games.values()) {
+        const existing = popularGames.get(game.key) ?? {
+          key: game.key,
+          name: game.name,
+          latestPlayedAt: null,
+          players: new Map<number, {
+            label: string;
+            latestPlayedAt: string | null;
+          }>()
+        };
+        const latestPlayedAt = parseDateMs(game.lastPlayedAt) > parseDateMs(existing.latestPlayedAt)
+          ? game.lastPlayedAt
+          : existing.latestPlayedAt;
+
+        existing.name = parseDateMs(game.lastPlayedAt) >= parseDateMs(existing.latestPlayedAt)
+          ? game.name
+          : existing.name;
+        existing.latestPlayedAt = latestPlayedAt;
+        existing.players.set(user.userId, {
+          label: formatTelegramLabel(user),
+          latestPlayedAt: game.lastPlayedAt
+        });
+        popularGames.set(game.key, existing);
+      }
+    }
+
+    if (popularGames.size === 0) {
+      await replyToCommand(
+        ctx,
+        skippedAccounts > 0
+          ? `Не получилось собрать популярные игры: все ${skippedAccounts} аккаунтов недоступны.`
+          : "Не нашёл сыгранных игр у привязанных участников."
+      );
+      return;
+    }
+
+    const topGames = [...popularGames.values()]
+      .sort((a, b) => {
+        if (b.players.size !== a.players.size) {
+          return b.players.size - a.players.size;
+        }
+
+        const latestDiff = parseDateMs(b.latestPlayedAt) - parseDateMs(a.latestPlayedAt);
+        if (latestDiff !== 0) {
+          return latestDiff;
+        }
+
+        return a.name.localeCompare(b.name, "ru-RU");
+      })
+      .slice(0, 3);
+
+    const lines = [
+      "Популярные игры чата",
+      "",
+      ...topGames.map((game, index) => {
+        const players = [...game.players.values()]
+          .sort((a, b) => a.label.localeCompare(b.label, "ru-RU"))
+          .map((player) => player.label);
+
+        return `${index + 1}. ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
+          "участник",
+          "участника",
+          "участников"
+        ])}: ${formatParticipantList(players)}`;
+      }),
+      ...(skippedAccounts > 0 ? ["", `Пропущено аккаунтов: ${skippedAccounts}`] : [])
+    ];
+
+    await replyToCommand(ctx, lines.join("\n"));
   });
 
   bot.command("table", async (ctx) => {
