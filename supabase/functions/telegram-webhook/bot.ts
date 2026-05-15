@@ -918,7 +918,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           skipped: null as PopularSkippedAccount | null
         };
       } catch (error) {
-        console.error(`Could not load played games for ${job.psnOnlineId}:`, error);
+        console.error(`Could not load popular game source data for ${job.psnOnlineId}:`, error);
         return {
           user: job.user,
           psnOnlineId: job.psnOnlineId,

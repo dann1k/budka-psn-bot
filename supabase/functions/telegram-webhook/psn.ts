@@ -250,28 +250,24 @@ export class PsnService {
       let offset = 0;
 
       while (true) {
-        const page = await psnApi.getUserPlayedGames(
+        const page = await psnApi.getUserTitles(
           { accessToken },
           profile.accountId,
-          {
-            limit: 200,
-            offset,
-            categories: "ps5_native_game,ps4_game,pspc_game,unknown"
-          }
+          { limit: 800, offset }
         );
 
-        for (const title of page.titles) {
-          const name = title.concept?.name || title.localizedName || title.name;
+        for (const title of page.trophyTitles) {
+          const name = title.trophyTitleName;
           const normalizedName = normalizeGameName(name);
 
           if (!normalizedName) {
             continue;
           }
 
-          const key = title.concept?.id !== undefined
-            ? `concept:${title.concept.id}`
-            : `name:${normalizedName}`;
-          const lastPlayedAt = title.lastPlayedDateTime || null;
+          const key = title.npCommunicationId
+            ? `trophy:${title.npServiceName}:${title.npCommunicationId}`
+            : `name:${normalizedName}:${title.trophyTitlePlatform}`;
+          const lastPlayedAt = title.lastUpdatedDateTime || null;
           const existing = games.get(key);
 
           if (
@@ -286,7 +282,7 @@ export class PsnService {
           }
         }
 
-        if (page.nextOffset === undefined || page.nextOffset <= offset || page.titles.length === 0) {
+        if (page.nextOffset === undefined || page.nextOffset <= offset || page.trophyTitles.length === 0) {
           break;
         }
 
