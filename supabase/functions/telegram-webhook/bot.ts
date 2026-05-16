@@ -398,11 +398,10 @@ function buildActionMenu(ownerId: number): InlineKeyboard {
     .text("Платины", buildMenuCallbackData(ownerId, "plats"))
     .text("Регионы", buildMenuCallbackData(ownerId, "region"))
     .row()
-    .text("Привязать PSN", buildMenuCallbackData(ownerId, "link"))
-    .row()
     .text("Выбрать default", buildMenuCallbackData(ownerId, "default"))
     .text("Summary по игроку", buildMenuCallbackData(ownerId, "summary_psn"))
     .row()
+    .text("Привязать PSN", buildMenuCallbackData(ownerId, "link"))
     .text("Отвязать PSN", buildMenuCallbackData(ownerId, "unlink"))
     .row()
     .text("Закрыть", buildMenuCallbackData(ownerId, "close"));
