@@ -350,6 +350,26 @@ function formatPopularDebugAccountList(accounts: PopularDebugAccount[], limit = 
   return `${formatted}; и ещё ${accounts.length - limit}`;
 }
 
+function formatPopularGameRow(game: PopularGameAccumulator, index: number): { text: string; entities: MessageEntity[] } {
+  const players = [...game.players.values()]
+    .sort((a, b) => a.localeCompare(b, "ru-RU"));
+  const title = `${index + 1}. ${game.name}`;
+  const details = `${game.players.size} ${pluralizeRu(game.players.size, [
+    "участник",
+    "участника",
+    "участников"
+  ])}: ${formatParticipantList(players)}`;
+  const text = `${title}\n${details}`;
+
+  return {
+    text,
+    entities: [
+      { type: "bold", offset: 0, length: utf16Length(title) },
+      { type: "blockquote", offset: 0, length: utf16Length(text) }
+    ]
+  };
+}
+
 function buildMenuCallbackData(ownerId: number, action: MenuAction): string {
   return `menu:${ownerId}:${action}`;
 }
@@ -1080,18 +1100,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         skippedAccounts.length > 0
-          ? [
-              `Не получилось собрать популярные игры: все ${skippedAccounts.length} аккаунтов недоступны.`,
-              ...(isDebug
-                ? [
-                    "",
-                    "Пропущенные аккаунты:",
-                    ...skippedAccounts
-                      .slice(0, 10)
-                      .map((account) => `- ${account.psnOnlineId} (${account.telegramLabel}): ${account.reason}`)
-                  ]
-                : [])
-            ].join("\n")
+          ? "Не получилось собрать популярные игры: доступных данных нет."
           : "Не нашёл сыгранных игр у привязанных участников."
       );
       return;
@@ -1126,29 +1135,20 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
       : [];
 
-    const lines = [
-      "Популярные игры чата",
-      "",
-      ...topGames.map((game, index) => {
-        const players = [...game.players.values()]
-          .sort((a, b) => a.localeCompare(b, "ru-RU"));
-
-        return `${index + 1}. ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
-          "участник",
-          "участника",
-          "участников"
-        ])}: ${formatParticipantList(players)}`;
-      }),
-      ...(skippedAccounts.length > 0 ? ["", `Пропущено аккаунтов: ${skippedAccounts.length}`] : []),
+    const messages = chunkRichMessages([
+      { text: "Популярные игры чата", entities: [] },
+      ...topGames.map((game, index) => formatPopularGameRow(game, index)),
       ...(isDebug && debugSearch
         ? [
-            "",
-            `Debug по игре: ${debugSearch}`,
-            `Проверено аккаунтов: ${loadedAccounts.length}, с совпадениями: ${debugMatchedAccountKeys.size}`,
+            { text: `Debug по игре: ${debugSearch}`, entities: [] },
+            {
+              text: `Проверено аккаунтов: ${loadedAccounts.length}, с совпадениями: ${debugMatchedAccountKeys.size}`,
+              entities: []
+            },
             ...(matchingDebugGames.length > 0
               ? matchingDebugGames
                   .slice(0, 20)
-                  .flatMap((game) => {
+                  .map((game) => {
                     const players = [...game.players.values()]
                       .sort((a, b) => a.localeCompare(b, "ru-RU"));
                     const accounts = [...game.accounts]
@@ -1156,45 +1156,51 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
                         formatPopularDebugAccount(b),
                         "ru-RU"
                       ));
-
-                    return [
+                    const text = [
                       `- ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
                         "участник",
                         "участника",
                         "участников"
                       ])}: ${formatParticipantList(players)}`,
                       `  аккаунты: ${formatPopularDebugAccountList(accounts)}`
-                    ];
+                    ].join("\n");
+
+                    return { text, entities: [] };
                   })
-              : ["Совпадений не найдено."]),
-            ...(matchingDebugGames.length > 20 ? [`...и ещё ${matchingDebugGames.length - 20}`] : []),
+              : [{ text: "Совпадений не найдено.", entities: [] }]),
+            ...(matchingDebugGames.length > 20
+              ? [{ text: `...и ещё ${matchingDebugGames.length - 20}`, entities: [] }]
+              : []),
             ...(debugAccountsWithoutMatch.length > 0
               ? [
-                  "",
-                  "Проверенные аккаунты без совпадений:",
+                  { text: "Проверенные аккаунты без совпадений:", entities: [] },
                   ...debugAccountsWithoutMatch
                     .slice(0, 10)
-                    .map((account) => `- ${formatPopularDebugAccount(account)}`),
+                    .map((account) => ({ text: `- ${formatPopularDebugAccount(account)}`, entities: [] })),
                   ...(debugAccountsWithoutMatch.length > 10
-                    ? [`...и ещё ${debugAccountsWithoutMatch.length - 10}`]
+                    ? [{ text: `...и ещё ${debugAccountsWithoutMatch.length - 10}`, entities: [] }]
                     : [])
                 ]
               : [])
           ]
-        : []),
-      ...(isDebug && skippedAccounts.length > 0
-        ? [
-            "",
-            "Пропущенные аккаунты:",
-            ...skippedAccounts
-              .slice(0, 10)
-              .map((account) => `- ${account.psnOnlineId} (${account.telegramLabel}): ${account.reason}`),
-            ...(skippedAccounts.length > 10 ? [`...и ещё ${skippedAccounts.length - 10}`] : [])
-          ]
         : [])
-    ];
+    ]);
 
-    await replyToCommand(ctx, lines.join("\n"));
+    for (const [index, message] of messages.entries()) {
+      await ctx.reply(
+        message.text,
+        index === 0 && ctx.msg
+          ? {
+              entities: message.entities,
+              reply_parameters: {
+                message_id: ctx.msg.message_id
+              }
+            }
+          : {
+              entities: message.entities
+            }
+      );
+    }
   }
 
   async function handleTable(ctx: TelegramActionContext): Promise<void> {
