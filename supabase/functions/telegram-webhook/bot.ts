@@ -1500,32 +1500,48 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     const actionCtx = ctx as unknown as TelegramActionContext;
+    const loadingMessage = await ctx.reply("Пожалуйста, подождите", {
+      reply_parameters: ctx.msg
+        ? {
+            message_id: ctx.msg.message_id
+          }
+        : undefined
+    });
+    const loadingMessageId = loadingMessage.message_id;
 
-    switch (callback.action) {
-      case "summary":
-        await handleSummary(actionCtx, actor, null);
-        return;
-      case "me":
-        await handleMe(actionCtx, actor);
-        return;
-      case "table":
-        await handleTable(actionCtx);
-        return;
-      case "popular":
-        await handlePopular(actionCtx);
-        return;
-      case "plats":
-        await handlePlats(actionCtx, actor, null);
-        return;
-      case "region":
-        await handleRegion(actionCtx, actor, null);
-        return;
-      case "link":
-      case "default":
-      case "summary_psn":
-      case "unlink":
-        await setPendingAction(actionCtx, actor, callback.action);
-        return;
+    try {
+      switch (callback.action) {
+        case "summary":
+          await handleSummary(actionCtx, actor, null);
+          return;
+        case "me":
+          await handleMe(actionCtx, actor);
+          return;
+        case "table":
+          await handleTable(actionCtx);
+          return;
+        case "popular":
+          await handlePopular(actionCtx);
+          return;
+        case "plats":
+          await handlePlats(actionCtx, actor, null);
+          return;
+        case "region":
+          await handleRegion(actionCtx, actor, null);
+          return;
+        case "link":
+        case "default":
+        case "summary_psn":
+        case "unlink":
+          await setPendingAction(actionCtx, actor, callback.action);
+          return;
+      }
+    } finally {
+      try {
+        await ctx.api.deleteMessage(ctx.chat.id, loadingMessageId);
+      } catch {
+        // Best-effort cleanup: the main bot response should not fail if Telegram refuses deletion.
+      }
     }
   });
 
