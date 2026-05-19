@@ -1140,15 +1140,25 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       : [];
 
     if (!isDebug && ctx.replyWithPhoto) {
+      const renderInput = topGames.map((game) => ({
+        name: game.name,
+        imageUrl: game.imageUrl,
+        players: [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"))
+      }));
+      const totalPlayers = renderInput.reduce((sum, g) => sum + g.players.length, 0);
+      console.log(
+        `[popular] start render: games=${renderInput.length} totalPlayers=${totalPlayers}`,
+      );
+
       try {
-        const popularPng = await renderPopularGames(
-          topGames.map((game) => ({
-            name: game.name,
-            imageUrl: game.imageUrl,
-            players: [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"))
-          }))
+        const renderStartedAt = Date.now();
+        const popularPng = await renderPopularGames(renderInput);
+        const renderDurationMs = Date.now() - renderStartedAt;
+        console.log(
+          `[popular] render done: bytes=${popularPng.byteLength} durationMs=${renderDurationMs}`,
         );
 
+        const uploadStartedAt = Date.now();
         await ctx.replyWithPhoto(new InputFile(popularPng, "popular-games.png"), ctx.msg
           ? {
               reply_parameters: {
@@ -1157,8 +1167,10 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             }
           : undefined
         );
+        console.log(`[popular] upload done: durationMs=${Date.now() - uploadStartedAt}`);
         return;
       } catch (error) {
+        console.error("[popular] render or upload failed:", error);
         const message = error instanceof Error ? error.message : "Не удалось отрендерить карточку.";
         await replyToCommand(ctx, `Не получилось собрать популярные игры: ${message}`);
         return;
@@ -1241,7 +1253,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     try {
+      const aggregateStartedAt = Date.now();
       const aggregatedPlayers = await Promise.all(users.map((user) => loadAggregatedPlayer(user)));
+      console.log(
+        `[table] aggregated players=${aggregatedPlayers.length} ms=${Date.now() - aggregateStartedAt}`,
+      );
 
       const sorted = aggregatedPlayers.sort((a, b) => {
         if (b.level !== a.level) {
@@ -1251,9 +1267,14 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return getTrophyWeight(b) - getTrophyWeight(a);
       });
 
+      const renderStartedAt = Date.now();
       const tablePng = await renderLeaderboard(sorted);
+      console.log(
+        `[table] render done bytes=${tablePng.byteLength} ms=${Date.now() - renderStartedAt}`,
+      );
 
       if (ctx.replyWithPhoto) {
+        const uploadStartedAt = Date.now();
         await ctx.replyWithPhoto(new InputFile(tablePng, "leaderboard.png"), ctx.msg
           ? {
               reply_parameters: {
@@ -1262,10 +1283,12 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             }
           : undefined
         );
+        console.log(`[table] upload done ms=${Date.now() - uploadStartedAt}`);
       } else {
         await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
       }
     } catch (error) {
+      console.error("[table] failed:", error);
       const message =
         error instanceof Error ? formatPsnError(error) : "Не удалось получить данные части профилей.";
       await replyToCommand(ctx, `Не получилось собрать таблицу: ${message}`);
@@ -1468,6 +1491,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   });
 
   bot.callbackQuery(/^menu:/, async (ctx) => {
+    const callbackReceivedAt = Date.now();
     const callback = parseMenuCallbackData(ctx.callbackQuery.data);
     if (!callback) {
       await ctx.answerCallbackQuery({
@@ -1491,7 +1515,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
+    const answerStartedAt = Date.now();
     await ctx.answerCallbackQuery();
+    console.log(
+      `[menu] action=${callback.action} answerCallbackQuery ms=${Date.now() - answerStartedAt} sinceCallback=${Date.now() - callbackReceivedAt}`,
+    );
 
     if (callback.action === "close") {
       try {
@@ -1521,6 +1549,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     });
     const loadingMessageId = loadingMessage.message_id;
 
+    const actionStartedAt = Date.now();
     try {
       switch (callback.action) {
         case "summary":
@@ -1549,6 +1578,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           return;
       }
     } finally {
+      console.log(
+        `[menu] action=${callback.action} handler totalMs=${Date.now() - actionStartedAt} sinceCallback=${Date.now() - callbackReceivedAt}`,
+      );
       try {
         await ctx.api.deleteMessage(ctx.chat.id, loadingMessageId);
       } catch {
