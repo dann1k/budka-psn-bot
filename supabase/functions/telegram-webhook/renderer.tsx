@@ -5,7 +5,12 @@ import satori from "npm:satori@0.13.0";
 import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
 import type { PsnSummary, PsnPlayedGameRich } from "./psn.ts";
 import type { AggregatedPlayer } from "./bot.ts";
-import { getInterBoldBuffer, getInterRegularBuffer, getResvgWasmBuffer } from "./renderer-assets.ts";
+import {
+  getInterBoldBuffer,
+  getInterRegularBuffer,
+  getResvgWasmBuffer,
+  getTrophyImageDataUrl,
+} from "./renderer-assets.ts";
 
 // --- JSX Hyperscript Helper for Satori ---
 export function h(type: any, props: any, ...children: any[]) {
@@ -72,42 +77,18 @@ async function fetchImageBase64(url: string | null | undefined): Promise<string 
   }
 }
 
-// --- Vector SVGs for UI ---
+// --- Vector and Image Helpers for UI ---
 const TrophyIcon = ({ type, size = 20 }: { type: "platinum" | "gold" | "silver" | "bronze"; size?: number }) => {
-  const fillColors = {
-    platinum: "#4facfe",
-    gold: "#ffb300",
-    silver: "#b0bec5",
-    bronze: "#a1887f",
-  };
-  const strokeColors = {
-    platinum: "#00f2fe",
-    gold: "#ffe082",
-    silver: "#eceff1",
-    bronze: "#d7ccc8",
-  };
-
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke={strokeColors[type]}
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ display: "flex" }}
-    >
-      <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" fill={fillColors[type]} opacity="0.4" />
-      <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" fill={fillColors[type]} opacity="0.4" />
-      <path d="M4 22h16" />
-      <path d="M10 14.66V17c0 .55-.45 1-1 1H4v2h16v-2h-5c-.55 0-1-.45-1-1v-2.34" />
-      <path
-        d="M12 2a6 6 0 0 0-6 6v3.5c0 1.63 1.3 3.32 3.5 3.5h5c2.2-.18 3.5-1.87 3.5-3.5V8a6 6 0 0 0-6-6z"
-        fill={fillColors[type]}
-      />
-    </svg>
+    <img
+      src={getTrophyImageDataUrl(type)}
+      style={{
+        display: "flex",
+        width: `${size}px`,
+        height: `${size}px`,
+        objectFit: "contain",
+      }}
+    />
   );
 };
 
@@ -423,7 +404,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
                 boxSizing: "border-box",
               }}
             >
-              <TrophyIcon type={type} size={28} />
+              <TrophyIcon type={type} size={40} />
               <span style={{ fontSize: "18px", fontWeight: "800", color: "white", marginTop: "8px", marginBottom: "2px" }}>
                 {player.trophies[type]}
               </span>
@@ -807,7 +788,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
                       marginLeft: tIndex > 0 ? "14px" : "0",
                     }}
                   >
-                    <TrophyIcon type={type} size={18} />
+                    <TrophyIcon type={type} size={24} />
                     <span style={{ fontSize: "14px", fontWeight: "700", color: "white", marginLeft: "4px" }}>
                       {player.trophies[type]}
                     </span>

@@ -9,10 +9,16 @@ const assetDir = path.join(functionDir, "assets");
 const outputPath = path.join(functionDir, "renderer-assets.ts");
 const chunkSize = 4096;
 
-const assets = [
+const binaryAssets = [
   ["RESVG_WASM_BASE64", "resvg.wasm"],
   ["INTER_REGULAR_BASE64", "Inter-Regular.ttf"],
   ["INTER_BOLD_BASE64", "Inter-Bold.ttf"],
+];
+const imageAssets = [
+  ["TROPHY_PLATINUM_DATA_URL", "trophy-platinum.png", "image/png"],
+  ["TROPHY_GOLD_DATA_URL", "trophy-gold.png", "image/png"],
+  ["TROPHY_SILVER_DATA_URL", "trophy-silver.png", "image/png"],
+  ["TROPHY_BRONZE_DATA_URL", "trophy-bronze.png", "image/png"],
 ];
 
 const lines = [
@@ -30,7 +36,7 @@ const lines = [
   "",
 ];
 
-for (const [name, fileName] of assets) {
+for (const [name, fileName] of binaryAssets) {
   const filePath = path.join(assetDir, fileName);
   const base64 = fs.readFileSync(filePath).toString("base64");
   lines.push(`const ${name} = [`);
@@ -41,6 +47,14 @@ for (const [name, fileName] of assets) {
 
   lines.push("] as const;", "");
 }
+
+for (const [name, fileName, contentType] of imageAssets) {
+  const filePath = path.join(assetDir, fileName);
+  const base64 = fs.readFileSync(filePath).toString("base64");
+  lines.push(`const ${name} = "data:${contentType};base64,${base64}";`);
+}
+
+lines.push("");
 
 lines.push(
   "let resvgWasmBuffer: ArrayBuffer | null = null;",
@@ -64,6 +78,19 @@ lines.push(
   "export function getInterBoldBuffer(): ArrayBuffer {",
   "  interBoldBuffer ??= decodeBase64Chunks(INTER_BOLD_BASE64);",
   "  return cloneBuffer(interBoldBuffer);",
+  "}",
+  "",
+  'export type TrophyKind = "platinum" | "gold" | "silver" | "bronze";',
+  "",
+  "const TROPHY_IMAGE_DATA_URLS: Record<TrophyKind, string> = {",
+  "  platinum: TROPHY_PLATINUM_DATA_URL,",
+  "  gold: TROPHY_GOLD_DATA_URL,",
+  "  silver: TROPHY_SILVER_DATA_URL,",
+  "  bronze: TROPHY_BRONZE_DATA_URL,",
+  "};",
+  "",
+  "export function getTrophyImageDataUrl(type: TrophyKind): string {",
+  "  return TROPHY_IMAGE_DATA_URLS[type];",
   "}",
   ""
 );
