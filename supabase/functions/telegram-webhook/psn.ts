@@ -177,6 +177,27 @@ function normalizeGameName(value: string): string {
   return value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 }
 
+const AVATAR_SIZE_PRIORITY: Record<string, number> = { xl: 4, l: 3, m: 2, s: 1 };
+
+function pickLargestAvatarUrl(
+  avatarUrls: ReadonlyArray<{ size?: string | null; avatarUrl?: string | null }> | undefined,
+): string | null {
+  if (!avatarUrls?.length) return null;
+
+  let best: { url: string; rank: number } | null = null;
+
+  for (const entry of avatarUrls) {
+    const url = entry?.avatarUrl;
+    if (!url) continue;
+    const rank = AVATAR_SIZE_PRIORITY[entry?.size?.toLowerCase() ?? ""] ?? 0;
+    if (!best || rank > best.rank) {
+      best = { url, rank };
+    }
+  }
+
+  return best?.url ?? null;
+}
+
 type AuthState = {
   accessToken: string;
   refreshToken: string;
@@ -271,7 +292,7 @@ export class PsnService {
         onlineId: profile.onlineId ?? onlineId,
         accountId: profile.accountId,
         profileUrl,
-        avatarUrl: profile.avatarUrls?.[0]?.avatarUrl ?? null,
+        avatarUrl: pickLargestAvatarUrl(profile.avatarUrls),
         hasPlus: profile.plus === 1,
         presence,
         recentGames: playedGamesRich.map((g) => g.name),

@@ -26,6 +26,14 @@ export function h(type: any, props: any, ...children: any[]) {
 
 export const Fragment = (props: any) => props.children;
 
+// Logical layout width used by Satori for all cards. Resvg rasterizes the
+// SVG at CARD_LOGICAL_WIDTH * RENDER_SCALE px wide. The scale is chosen so
+// the resulting PNG stays at or under Telegram's 1280px sendPhoto limit,
+// avoiding server-side recompression while keeping text crisp.
+const CARD_LOGICAL_WIDTH = 800;
+const RENDER_SCALE = 1.6;
+const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
+
 // --- Cache for WASM and Fonts ---
 let isWasmInit = false;
 let fontRegularBuffer: ArrayBuffer | null = null;
@@ -512,7 +520,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
   );
 
   const svg = await satori(cardHtml, {
-    width: 800,
+    width: CARD_LOGICAL_WIDTH,
     height: 550,
     fonts: [
       {
@@ -533,7 +541,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: 800,
+      value: RENDER_OUTPUT_WIDTH,
     },
   });
 
@@ -806,7 +814,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   );
 
   const svg = await satori(leaderboardHtml, {
-    width: 800,
+    width: CARD_LOGICAL_WIDTH,
     height: calculatedHeight,
     fonts: [
       {
@@ -827,7 +835,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: 800,
+      value: RENDER_OUTPUT_WIDTH,
     },
   });
 
@@ -1037,7 +1045,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
   );
 
   const svg = await satori(popularHtml, {
-    width: 800,
+    width: CARD_LOGICAL_WIDTH,
     height: calculatedHeight,
     fonts: [
       {
@@ -1058,7 +1066,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: 800,
+      value: RENDER_OUTPUT_WIDTH,
     },
   });
 
