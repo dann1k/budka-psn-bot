@@ -5,6 +5,7 @@ import satori from "npm:satori@0.13.0";
 import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
 import type { PsnSummary, PsnPlayedGameRich } from "./psn.ts";
 import type { AggregatedPlayer } from "./bot.ts";
+import { getInterBoldBuffer, getInterRegularBuffer, getResvgWasmBuffer } from "./renderer-assets.ts";
 
 // --- JSX Hyperscript Helper for Satori ---
 export function h(type: any, props: any, ...children: any[]) {
@@ -24,15 +25,6 @@ let isWasmInit = false;
 let fontRegularBuffer: ArrayBuffer | null = null;
 let fontBoldBuffer: ArrayBuffer | null = null;
 
-async function readAsset(path: string): Promise<ArrayBuffer> {
-  try {
-    const bytes = await Deno.readFile(new URL(path, import.meta.url));
-    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  } catch (error) {
-    throw new Error(`Failed to read renderer asset ${path}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
 function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
   const signature = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 4)));
   const validSignatures = new Set(["\x00\x01\x00\x00", "OTTO", "ttcf", "wOFF"]);
@@ -44,18 +36,18 @@ function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
 
 async function initRenderer() {
   if (!isWasmInit) {
-    const wasmBuffer = await readAsset("./assets/resvg.wasm");
+    const wasmBuffer = getResvgWasmBuffer();
     await initWasm(wasmBuffer);
     isWasmInit = true;
   }
 
   if (!fontRegularBuffer) {
-    fontRegularBuffer = await readAsset("./assets/Inter-Regular.ttf");
+    fontRegularBuffer = getInterRegularBuffer();
     assertOpenTypeAsset("Inter-Regular.ttf", fontRegularBuffer);
   }
 
   if (!fontBoldBuffer) {
-    fontBoldBuffer = await readAsset("./assets/Inter-Bold.ttf");
+    fontBoldBuffer = getInterBoldBuffer();
     assertOpenTypeAsset("Inter-Bold.ttf", fontBoldBuffer);
   }
 }
