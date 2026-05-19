@@ -27,11 +27,13 @@ export function h(type: any, props: any, ...children: any[]) {
 export const Fragment = (props: any) => props.children;
 
 // Logical layout width used by Satori for all cards. Resvg rasterizes the
-// SVG at CARD_LOGICAL_WIDTH * RENDER_SCALE px wide. The scale is chosen so
-// the resulting PNG stays at or under Telegram's 1280px sendPhoto limit,
-// avoiding server-side recompression while keeping text crisp.
+// SVG at CARD_LOGICAL_WIDTH * RENDER_SCALE px wide. Scale is kept at 1.0
+// because Supabase Edge Functions on the free plan cap CPU time at ~2s per
+// request, and resvg at 1.6x (~2.5x more pixels) consistently blew that
+// budget — the function got killed mid-render, Telegram retried the
+// webhook, and users saw duplicate "please wait" messages.
 const CARD_LOGICAL_WIDTH = 800;
-const RENDER_SCALE = 1.6;
+const RENDER_SCALE = 1.0;
 const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
