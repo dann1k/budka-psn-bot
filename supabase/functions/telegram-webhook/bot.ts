@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard } from "npm:grammy@1.41.1/web";
+import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "npm:grammy@1.41.1/web";
 import type { MessageEntity } from "npm:grammy@1.41.1/types";
 import {
   formatLeaderboardRow,
@@ -17,13 +17,14 @@ import {
   type PsnTrophyTitleGameSource
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
+import { renderGamerCard, renderLeaderboard } from "./renderer.tsx";
 
 type BotConfig = {
   botToken: string;
   emojis: EmojiConfig;
 };
 
-type AggregatedPlayer = {
+export type AggregatedPlayer = {
   user: LinkedUser;
   accountLinks: LinkedAccount[];
   accountSummaries: PsnSummary[];
@@ -82,7 +83,7 @@ type TelegramActionContext = {
     text?: string;
   };
   reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
-  replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+  replyWithPhoto?: (photo: string | InputFile, other?: Record<string, unknown>) => Promise<unknown>;
 };
 
 type MenuAction =
@@ -243,7 +244,7 @@ async function replyToCommand(
 async function replySummary(
   ctx: {
     reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
-    replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+    replyWithPhoto?: (photo: string | InputFile, other?: Record<string, unknown>) => Promise<unknown>;
     msg?: { message_id: number };
   },
   text: string,
@@ -717,32 +718,35 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
         const summary = await psnService.getSummaryByOnlineId(targetArg);
-        const summaryMessage = formatSummary(
-          {
-            primaryAccount: {
-              onlineId: summary.onlineId,
-              regionCode: summary.region?.code,
-              hasPlus: summary.hasPlus,
-              status: summary.presence.status,
-              lastOnline: summary.presence.lastOnline,
-              currentGames: summary.presence.currentGames,
-              recentGames: summary.recentGames
-            },
-            otherAccounts: [],
-            level: summary.level,
-            progress: summary.progress,
-            trophies: summary.trophies
+        const mockPlayer: AggregatedPlayer = {
+          user: {
+            userId: 0,
+            chatId: ctx.chat.id,
+            username: null,
+            displayName: "Данные из PSN",
+            defaultPsnOnlineId: null
           },
-          config.emojis
-        );
-        const prefix = "Данные напрямую из PSN\n\n";
+          accountLinks: [],
+          accountSummaries: [summary],
+          accounts: [],
+          level: summary.level,
+          progress: summary.progress,
+          trophies: summary.trophies
+        };
 
-        await replySummary(
-          ctx,
-          `${prefix}${summaryMessage.text}`,
-          shiftEntities(summaryMessage.entities, prefix),
-          summary.avatarUrl
-        );
+        const cardPng = await renderGamerCard(mockPlayer, summary);
+        if (ctx.replyWithPhoto) {
+          await ctx.replyWithPhoto(new InputFile(cardPng, `${summary.onlineId}_card.png`), ctx.msg
+            ? {
+                reply_parameters: {
+                  message_id: ctx.msg.message_id
+                }
+              }
+            : undefined
+          );
+        } else {
+          await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+        }
       } catch (error) {
         const message = formatPsnError(error, targetArg);
         await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -765,23 +769,20 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     try {
       const aggregated = await loadAggregatedPlayer(targetUser);
       const preferred = pickPreferredAccount(aggregated);
-      const summaryMessage = formatSummary(
-        {
-          primaryAccount: aggregated.accounts[preferred.index],
-          otherAccounts: aggregated.accounts.filter((_, index) => index !== preferred.index),
-          level: aggregated.level,
-          progress: aggregated.progress,
-          trophies: aggregated.trophies
-        },
-        config.emojis
-      );
-      const prefix = `${formatTelegramName(targetUser)}\n\n`;
-      await replySummary(
-        ctx,
-        `${prefix}${summaryMessage.text}`,
-        shiftEntities(summaryMessage.entities, prefix),
-        preferred.summary.avatarUrl
-      );
+      const cardPng = await renderGamerCard(aggregated, preferred.summary);
+
+      if (ctx.replyWithPhoto) {
+        await ctx.replyWithPhoto(new InputFile(cardPng, `${preferred.summary.onlineId}_card.png`), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
+              }
+            }
+          : undefined
+        );
+      } else {
+        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+      }
     } catch (error) {
       const message = formatPsnError(error);
       await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -1213,45 +1214,27 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     try {
       const aggregatedPlayers = await Promise.all(users.map((user) => loadAggregatedPlayer(user)));
 
-      const sorted = aggregatedPlayers
-        .sort((a, b) => {
-          if (b.level !== a.level) {
-            return b.level - a.level;
-          }
+      const sorted = aggregatedPlayers.sort((a, b) => {
+        if (b.level !== a.level) {
+          return b.level - a.level;
+        }
 
-          return getTrophyWeight(b) - getTrophyWeight(a);
-        })
-        .map((player) =>
-          formatLeaderboardRow(
-            {
-              telegramLabel: formatTelegramName(player.user),
-              accounts: player.accounts,
-              level: player.level,
-              trophies: player.trophies
-            },
-            config.emojis
-          )
-        );
+        return getTrophyWeight(b) - getTrophyWeight(a);
+      });
 
-      const messages = chunkRichMessages([
-        { text: `Таблица группы по PSN (${sorted.length}):`, entities: [] },
-        ...sorted
-      ]);
+      const tablePng = await renderLeaderboard(sorted);
 
-      for (const [index, message] of messages.entries()) {
-        await ctx.reply(
-          message.text,
-          index === 0 && ctx.msg
-            ? {
-                entities: message.entities,
-                reply_parameters: {
-                  message_id: ctx.msg.message_id
-                }
+      if (ctx.replyWithPhoto) {
+        await ctx.replyWithPhoto(new InputFile(tablePng, "leaderboard.png"), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
               }
-            : {
-                entities: message.entities
-              }
+            }
+          : undefined
         );
+      } else {
+        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
       }
     } catch (error) {
       const message =
