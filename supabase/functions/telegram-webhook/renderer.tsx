@@ -34,6 +34,39 @@ const CARD_LOGICAL_WIDTH = 800;
 const RENDER_SCALE = 1.6;
 const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
 
+// Rough estimate of how many wrapped lines a row of player pills will take,
+// given Satori-rendered Inter Bold 11px pills with 8px horizontal padding
+// and 6px gap between pills. Slightly overestimates per-char width so the
+// computed row height never clips the pills.
+const PILL_AVG_CHAR_WIDTH = 7;
+const PILL_HORIZONTAL_PADDING = 16;
+const PILL_GAP = 6;
+
+function estimatePillLines(players: readonly string[], maxWidth: number): number {
+  if (players.length === 0) return 1;
+
+  let lines = 1;
+  let usedWidth = 0;
+
+  for (const player of players) {
+    const pillWidth = Math.ceil(player.length * PILL_AVG_CHAR_WIDTH) + PILL_HORIZONTAL_PADDING;
+
+    if (usedWidth === 0) {
+      usedWidth = pillWidth;
+      continue;
+    }
+
+    if (usedWidth + PILL_GAP + pillWidth > maxWidth) {
+      lines += 1;
+      usedWidth = pillWidth;
+    } else {
+      usedWidth += PILL_GAP + pillWidth;
+    }
+  }
+
+  return lines;
+}
+
 // --- Cache for WASM and Fonts ---
 let isWasmInit = false;
 let fontRegularBuffer: ArrayBuffer | null = null;
@@ -848,10 +881,22 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
 
   const topGames = games.slice(0, 5);
   const maxPlayers = Math.max(1, ...topGames.map((game) => game.players.length));
-  const rowHeight = 96;
   const headerHeight = 170;
   const bottomMargin = 34;
-  const calculatedHeight = headerHeight + topGames.length * rowHeight + bottomMargin;
+  const rowMarginBottom = 18;
+  const baseRowHeight = 78;
+  const pillLineHeight = 22;
+  const playerColumnWidth = 345;
+  const pillLinesByGame = topGames.map((game) =>
+    estimatePillLines(game.players, playerColumnWidth),
+  );
+  const rowHeights = pillLinesByGame.map(
+    (lines) => baseRowHeight + Math.max(0, lines - 1) * pillLineHeight,
+  );
+  const calculatedHeight =
+    headerHeight +
+    rowHeights.reduce((sum, h) => sum + h + rowMarginBottom, 0) +
+    bottomMargin;
   const covers = await Promise.all(topGames.map((game) => fetchImageBase64(game.imageUrl)));
   const pillColors = ["#2563eb", "#059669", "#b45309", "#9333ea", "#be123c"];
 
@@ -895,9 +940,9 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
         {topGames.map((game, index) => {
           const rank = index + 1;
           const cover = covers[index];
-          const players = game.players.slice(0, 4);
-          const hiddenPlayers = Math.max(0, game.players.length - players.length);
+          const players = game.players;
           const popularity = Math.max(10, Math.round((game.players.length / maxPlayers) * 100));
+          const rowHeight = rowHeights[index];
 
           return (
             <div
@@ -906,12 +951,12 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
                 display: "flex",
                 alignItems: "center",
                 width: "100%",
-                height: "78px",
+                height: `${rowHeight}px`,
                 padding: "10px 18px",
                 backgroundColor: rank === 1 ? "rgba(251, 191, 36, 0.045)" : "rgba(255, 255, 255, 0.025)",
                 border: rank === 1 ? "1.5px solid rgba(251, 191, 36, 0.28)" : "1px solid rgba(147, 197, 253, 0.16)",
                 borderRadius: "14px",
-                marginBottom: "18px",
+                marginBottom: `${rowMarginBottom}px`,
                 boxSizing: "border-box",
               }}
             >
@@ -955,7 +1000,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
                 )}
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", width: "345px", overflow: "hidden", marginRight: "22px" }}>
+              <div style={{ display: "flex", flexDirection: "column", width: `${playerColumnWidth}px`, marginRight: "22px" }}>
                 <span
                   style={{
                     fontSize: "22px",
@@ -969,13 +1014,12 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
                 >
                   {game.name}
                 </span>
-                <div style={{ display: "flex", alignItems: "center", width: "100%", overflow: "hidden" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", width: "100%" }}>
                   {players.map((player, playerIndex) => (
                     <div
                       key={`${game.name}-${player}`}
                       style={{
                         display: "flex",
-                        maxWidth: "86px",
                         padding: "3px 8px",
                         borderRadius: "12px",
                         backgroundColor: pillColors[playerIndex % pillColors.length],
@@ -983,29 +1027,14 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
                         fontSize: "11px",
                         fontWeight: "700",
                         marginRight: "6px",
-                        overflow: "hidden",
+                        marginBottom: "4px",
                       }}
                     >
-                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <span style={{ whiteSpace: "nowrap" }}>
                         {player}
                       </span>
                     </div>
                   ))}
-                  {hiddenPlayers > 0 && (
-                    <div
-                      style={{
-                        display: "flex",
-                        padding: "3px 8px",
-                        borderRadius: "12px",
-                        backgroundColor: "#334155",
-                        color: "#bfdbfe",
-                        fontSize: "11px",
-                        fontWeight: "800",
-                      }}
-                    >
-                      +{hiddenPlayers}
-                    </div>
-                  )}
                 </div>
               </div>
 
