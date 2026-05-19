@@ -626,17 +626,43 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
             rankBadge = <CrownIcon size={24} />;
           } else if (rank === 2) {
             rankBadge = (
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="#9ca3af" style={{ display: "flex" }}>
-                <circle cx="12" cy="12" r="10" stroke="#78716c" strokeWidth="1" />
-                <text x="12" y="16" fontSize="12" fontWeight="800" textAnchor="middle" fill="#1f2937">2</text>
-              </svg>
+              <div
+                style={{
+                  display: "flex",
+                  width: "24px",
+                  height: "24px",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "50%",
+                  backgroundColor: "#9ca3af",
+                  border: "1px solid #78716c",
+                  color: "#1f2937",
+                  fontSize: "12px",
+                  fontWeight: "800",
+                }}
+              >
+                2
+              </div>
             );
           } else if (rank === 3) {
             rankBadge = (
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="#b45309" style={{ display: "flex" }}>
-                <circle cx="12" cy="12" r="10" stroke="#7c2d12" strokeWidth="1" />
-                <text x="12" y="16" fontSize="12" fontWeight="800" textAnchor="middle" fill="#fef3c7">3</text>
-              </svg>
+              <div
+                style={{
+                  display: "flex",
+                  width: "24px",
+                  height: "24px",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "50%",
+                  backgroundColor: "#b45309",
+                  border: "1px solid #7c2d12",
+                  color: "#fef3c7",
+                  fontSize: "12px",
+                  fontWeight: "800",
+                }}
+              >
+                3
+              </div>
             );
           } else {
             rankBadge = (
