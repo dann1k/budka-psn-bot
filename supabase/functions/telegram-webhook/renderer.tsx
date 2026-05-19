@@ -24,37 +24,39 @@ let isWasmInit = false;
 let fontRegularBuffer: ArrayBuffer | null = null;
 let fontBoldBuffer: ArrayBuffer | null = null;
 
+async function readAsset(path: string): Promise<ArrayBuffer> {
+  try {
+    const bytes = await Deno.readFile(new URL(path, import.meta.url));
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  } catch (error) {
+    throw new Error(`Failed to read renderer asset ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
+  const signature = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 4)));
+  const validSignatures = new Set(["\x00\x01\x00\x00", "OTTO", "ttcf", "wOFF"]);
+
+  if (!validSignatures.has(signature)) {
+    throw new Error(`Invalid font asset ${name}: unsupported OpenType signature ${JSON.stringify(signature)}`);
+  }
+}
+
 async function initRenderer() {
   if (!isWasmInit) {
-    try {
-      const wasmUrl = new URL("https://unpkg.com/@resvg/resvg-wasm@2.6.2/index_bg.wasm");
-      const response = await fetch(wasmUrl);
-      const wasmBuffer = await response.arrayBuffer();
-      await initWasm(wasmBuffer);
-      isWasmInit = true;
-    } catch (err) {
-      console.error("Failed to initialize resvg WASM:", err);
-    }
+    const wasmBuffer = await readAsset("./assets/resvg.wasm");
+    await initWasm(wasmBuffer);
+    isWasmInit = true;
   }
 
   if (!fontRegularBuffer) {
-    try {
-      const fontUrl = "https://raw.githubusercontent.com/google/fonts/main/ofl/inter/static/Inter-Regular.ttf";
-      const response = await fetch(fontUrl);
-      fontRegularBuffer = await response.arrayBuffer();
-    } catch (err) {
-      console.error("Failed to load regular font:", err);
-    }
+    fontRegularBuffer = await readAsset("./assets/Inter-Regular.ttf");
+    assertOpenTypeAsset("Inter-Regular.ttf", fontRegularBuffer);
   }
 
   if (!fontBoldBuffer) {
-    try {
-      const fontUrl = "https://raw.githubusercontent.com/google/fonts/main/ofl/inter/static/Inter-Bold.ttf";
-      const response = await fetch(fontUrl);
-      fontBoldBuffer = await response.arrayBuffer();
-    } catch (err) {
-      console.error("Failed to load bold font:", err);
-    }
+    fontBoldBuffer = await readAsset("./assets/Inter-Bold.ttf");
+    assertOpenTypeAsset("Inter-Bold.ttf", fontBoldBuffer);
   }
 }
 
@@ -73,8 +75,7 @@ async function fetchImageBase64(url: string | null | undefined): Promise<string 
     }
     const base64 = btoa(binary);
     return `data:${contentType};base64,${base64}`;
-  } catch (err) {
-    console.error("Failed to fetch image for base64 conversion:", url, err);
+  } catch {
     return null;
   }
 }
@@ -146,6 +147,28 @@ const CrownIcon = ({ size = 28 }: { size?: number }) => (
     <path d="M3 20h18" strokeWidth="2" />
   </svg>
 );
+
+const AvatarPlaceholder = ({ label, fontSize = 28 }: { label: string; fontSize?: number }) => {
+  const initial = label.trim().slice(0, 1).toUpperCase() || "?";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        width: "100%",
+        height: "100%",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundImage: "linear-gradient(135deg, #1d4ed8, #7c3aed)",
+        color: "#dbeafe",
+        fontSize: `${fontSize}px`,
+        fontWeight: "800",
+      }}
+    >
+      {initial}
+    </div>
+  );
+};
 
 const StarIcon = ({ size = 20 }: { size?: number }) => (
   <svg
@@ -221,8 +244,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
     ...(preferredSummary.recentGamesRich || []).map((game) => fetchImageBase64(game.imageUrl)),
   ]);
 
-  const defaultAvatar = "https://raw.githubusercontent.com/achievements-app/psn-api/main/assets/psn-logo.png";
-  const finalAvatar = avatarBase64 || await fetchImageBase64(defaultAvatar);
+  const finalAvatar = avatarBase64;
 
   const statusInfo = getStatusBadge(
     preferredSummary.presence.status,
@@ -264,14 +286,18 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
             overflow: "hidden",
           }}
         >
-          <img
-            src={finalAvatar}
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-            }}
-          />
+          {finalAvatar ? (
+            <img
+              src={finalAvatar}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+              }}
+            />
+          ) : (
+            <AvatarPlaceholder label={preferredSummary.onlineId} fontSize={34} />
+          )}
         </div>
 
         {/* Profile Info */}
@@ -295,6 +321,11 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
                   boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
                 }}
               />
+            )}
+            {!flagBase64 && preferredSummary.region?.code && (
+              <span style={{ fontSize: "13px", color: "#93c5fd", fontWeight: "800" }}>
+                {preferredSummary.region.code.toUpperCase()}
+              </span>
             )}
           </div>
           <span style={{ fontSize: "16px", color: "#a5b4fc", fontWeight: "500", marginBottom: "4px" }}>
@@ -526,12 +557,9 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
         fetchImageBase64(avatarUrl),
         fetchImageBase64(regionCode ? `https://flagcdn.com/w80/${regionCode.toLowerCase()}.png` : null),
       ]);
-      return { avatar, flag };
+      return { avatar, flag, regionCode };
     })
   );
-
-  const defaultAvatar = "https://raw.githubusercontent.com/achievements-app/psn-api/main/assets/psn-logo.png";
-  const defaultAvatarBase64 = await fetchImageBase64(defaultAvatar);
 
   const leaderboardHtml = (
     <div
@@ -597,8 +625,8 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
       <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
         {players.map((player, index) => {
           const rank = index + 1;
-          const { avatar, flag } = avatarsAndFlags[index];
-          const finalAvatar = avatar || defaultAvatarBase64;
+          const { avatar, flag, regionCode } = avatarsAndFlags[index];
+          const finalAvatar = avatar;
           const isFirst = rank === 1;
 
           let rankBadge = null;
@@ -661,7 +689,11 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
                     marginRight: "14px",
                   }}
                 >
-                  <img src={finalAvatar} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  {finalAvatar ? (
+                    <img src={finalAvatar} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ) : (
+                    <AvatarPlaceholder label={player.user.displayName} fontSize={18} />
+                  )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", width: "170px" }}>
                   <div style={{ display: "flex", alignItems: "center" }}>
@@ -680,6 +712,11 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
                     </span>
                     {flag && (
                       <img src={flag} style={{ width: "18px", height: "12px", borderRadius: "1.5px" }} />
+                    )}
+                    {!flag && regionCode && (
+                      <span style={{ fontSize: "10px", color: "#93c5fd", fontWeight: "800" }}>
+                        {regionCode.toUpperCase()}
+                      </span>
                     )}
                   </div>
                   <span
