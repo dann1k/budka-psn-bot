@@ -27,14 +27,18 @@ export function h(type: any, props: any, ...children: any[]) {
 export const Fragment = (props: any) => props.children;
 
 // Logical layout width used by Satori for all cards. Resvg rasterizes the
-// SVG at CARD_LOGICAL_WIDTH * RENDER_SCALE px wide. Scale is kept at 1.0
-// because Supabase Edge Functions on the free plan cap CPU time at ~2s per
-// request, and resvg at 1.6x (~2.5x more pixels) consistently blew that
-// budget — the function got killed mid-render, Telegram retried the
-// webhook, and users saw duplicate "please wait" messages.
+// SVG at CARD_LOGICAL_WIDTH * scale px wide. Scale is per-card because
+// Supabase Edge Functions on the free plan cap CPU time at ~2s per request.
+// Summary is a compact 800x550 card and survives a moderate upscale, so it
+// renders at SUMMARY_RENDER_SCALE for crisper text. Leaderboard and popular
+// can grow tall with chat size and must stay at 1.0x to fit the CPU budget;
+// otherwise the function gets killed mid-render and Telegram retries the
+// webhook (which produces duplicate "please wait" messages).
 const CARD_LOGICAL_WIDTH = 800;
-const RENDER_SCALE = 1.0;
+const RENDER_SCALE = 1.2;
 const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
+const SUMMARY_RENDER_SCALE = 1.4;
+const SUMMARY_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * SUMMARY_RENDER_SCALE);
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
 // given Satori-rendered Inter Bold 11px pills with 8px horizontal padding
@@ -576,7 +580,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: RENDER_OUTPUT_WIDTH,
+      value: SUMMARY_OUTPUT_WIDTH,
     },
   });
 
