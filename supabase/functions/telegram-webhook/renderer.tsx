@@ -10,6 +10,7 @@ import {
   getInterRegularBuffer,
   getResvgWasmBuffer,
   getTrophyImageDataUrl,
+  preloadTrophyImages,
 } from "./renderer-assets.ts";
 
 // --- JSX Hyperscript Helper for Satori ---
@@ -41,20 +42,22 @@ function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
 
 async function initRenderer() {
   if (!isWasmInit) {
-    const wasmBuffer = getResvgWasmBuffer();
+    const wasmBuffer = await getResvgWasmBuffer();
     await initWasm(wasmBuffer);
     isWasmInit = true;
   }
 
   if (!fontRegularBuffer) {
-    fontRegularBuffer = getInterRegularBuffer();
+    fontRegularBuffer = await getInterRegularBuffer();
     assertOpenTypeAsset("Inter-Regular.ttf", fontRegularBuffer);
   }
 
   if (!fontBoldBuffer) {
-    fontBoldBuffer = getInterBoldBuffer();
+    fontBoldBuffer = await getInterBoldBuffer();
     assertOpenTypeAsset("Inter-Bold.ttf", fontBoldBuffer);
   }
+
+  await preloadTrophyImages();
 }
 
 // --- Image Fetching Helper (converts to Base64) ---

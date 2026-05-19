@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/deno-check.mjs",
-    "renderer:assets": "node scripts/generate-renderer-assets.mjs",
     "migrate:dry-run": "node scripts/migrate-sqlite-to-supabase.mjs",
     "migrate:apply": "node scripts/migrate-sqlite-to-supabase.mjs --apply",
     "psn:token": "node scripts/print-psn-access-token.mjs"

@@ -17,8 +17,8 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `supabase/functions/telegram-webhook/psn-auth-store.ts` — зашифрованное хранение PSN access/refresh tokens в Supabase.
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
-- `supabase/functions/telegram-webhook/renderer-assets.ts` — embedded assets для графических карточек: Inter и `resvg.wasm`, чтобы Supabase bundle не зависел от runtime-чтения файлов.
-- `renderer-assets-source/` — исходные renderer assets и лицензии; при обновлении шрифтов, wasm или trophy-иконок нужно регенерировать `supabase/functions/telegram-webhook/renderer-assets.ts` через `npm run renderer:assets`. Эти исходники лежат вне папки Edge Function, чтобы не попасть в Supabase deploy bundle сверх embedded-версии.
+- `supabase/functions/telegram-webhook/renderer-assets.ts` — ленивая загрузка ассетов (Inter, `resvg.wasm`, иконки трофеев) из публичного бакета Supabase Storage `renderer-assets` на cold start; буферы кэшируются в памяти изолята. См. ниже раздел «Настройка Supabase Storage».
+- `renderer-assets-source/` — исходные renderer assets и их лицензии. Файлы из этой папки нужно вручную загружать в бакет `renderer-assets` при обновлении. В Supabase deploy bundle папка не попадает.
 - `supabase/migrations/` — схема Postgres.
 - `.github/workflows/deploy-supabase.yml` — автодеплой на push в `main`.
 - `scripts/migrate-sqlite-to-supabase.mjs` — одноразовый перенос старой SQLite-базы.
@@ -124,6 +124,27 @@ BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 4. Telegram `setWebhook` на `https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook` с `allowed_updates: ["message", "callback_query"]`.
 
 Перед первым деплоем нужно создать Supabase project и заполнить GitHub Actions secrets.
+
+## Настройка Supabase Storage
+
+Edge Function на cold start подтягивает шрифты, `resvg.wasm` и PNG-иконки трофеев из приватного бакета Supabase Storage. Функция ходит туда с `service_role` ключом, который Supabase сам инжектит в env Edge Function как `SUPABASE_SERVICE_ROLE_KEY` (этот ключ обходит RLS, отдельные политики на `storage.objects` не нужны). Без бакета функция стартует с ошибкой `Failed to fetch renderer asset ...`.
+
+1. Supabase Dashboard -> Storage -> `New bucket`.
+2. Name: `renderer-assets`, флажок `Public bucket` **выключен**, остальные настройки по умолчанию.
+3. Открыть SQL Editor и выполнить `supabase/migrations/20260519230000_renderer_assets_storage_policy.sql` — миграция фиксирует приватный флаг бакета и удаляет старую публичную RLS-политику, если она вдруг осталась. Идемпотентна, можно запускать повторно.
+4. Внутри созданного бакета загрузить файлы из локальной папки `renderer-assets-source/` (можно перетаскиванием):
+   - `resvg.wasm`
+   - `Inter-Regular.ttf`
+   - `Inter-Bold.ttf`
+   - `trophy-platinum.png`
+   - `trophy-gold.png`
+   - `trophy-silver.png`
+   - `trophy-bronze.png`
+5. Проверить доступ из терминала: `curl -I -H "Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>" "https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/renderer-assets/resvg.wasm"` — должен вернуть `HTTP/2 200`. Без заголовка тот же URL должен возвращать `400/404` — это и есть закрытый доступ.
+
+При обновлении шрифтов, wasm или иконок: положить новую версию в `renderer-assets-source/` (для истории и лицензий) и перезалить тот же файл в бакет с тем же именем. Имена в бакете строго совпадают с именами файлов в `renderer-assets-source/`.
+
+`SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY` Supabase подставляет в Edge Functions автоматически — дополнительных секретов в GitHub Actions добавлять не нужно.
 
 ## Ручная миграция схемы
 
