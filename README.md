@@ -18,7 +18,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
 - `supabase/functions/telegram-webhook/renderer-assets.ts` — embedded assets для графических карточек: Inter и `resvg.wasm`, чтобы Supabase bundle не зависел от runtime-чтения файлов.
-- `supabase/functions/telegram-webhook/assets/` — исходные renderer assets и лицензии; при обновлении шрифтов, wasm или trophy-иконок нужно регенерировать `renderer-assets.ts` через `npm run renderer:assets`.
+- `renderer-assets-source/` — исходные renderer assets и лицензии; при обновлении шрифтов, wasm или trophy-иконок нужно регенерировать `supabase/functions/telegram-webhook/renderer-assets.ts` через `npm run renderer:assets`. Эти исходники лежат вне папки Edge Function, чтобы не попасть в Supabase deploy bundle сверх embedded-версии.
 - `supabase/migrations/` — схема Postgres.
 - `.github/workflows/deploy-supabase.yml` — автодеплой на push в `main`.
 - `scripts/migrate-sqlite-to-supabase.mjs` — одноразовый перенос старой SQLite-базы.

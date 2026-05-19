@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const functionDir = path.join(repoRoot, "supabase", "functions", "telegram-webhook");
-const assetDir = path.join(functionDir, "assets");
+const assetDir = path.join(repoRoot, "renderer-assets-source");
 const outputPath = path.join(functionDir, "renderer-assets.ts");
 const chunkSize = 4096;
 
