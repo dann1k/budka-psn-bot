@@ -174,6 +174,12 @@ const StarIcon = ({ size = 20 }: { size?: number }) => (
   </svg>
 );
 
+type PopularGameCardItem = {
+  name: string;
+  imageUrl: string | null;
+  players: string[];
+};
+
 // --- Simple Utility Helpers ---
 function parseDurationHours(durationStr: string | undefined): string {
   if (!durationStr) return "0 ч";
@@ -200,6 +206,26 @@ function getRelativeTimeStr(dateStr: string | null | undefined): string {
   if (minutes < 60) return `${Math.max(1, minutes)} мин. назад`;
   if (hours < 24) return `${hours} ч. назад`;
   return `${days} дн. назад`;
+}
+
+function pluralizeRu(value: number, forms: [string, string, string]): string {
+  const absolute = Math.abs(value);
+  const lastTwo = absolute % 100;
+  const last = absolute % 10;
+
+  if (lastTwo >= 11 && lastTwo <= 14) {
+    return forms[2];
+  }
+
+  if (last === 1) {
+    return forms[0];
+  }
+
+  if (last >= 2 && last <= 4) {
+    return forms[1];
+  }
+
+  return forms[2];
 }
 
 function getStatusBadge(status: string | undefined, currentGames: string[], lastOnline: string | null): { text: string; color: string; ringColor: string } {
@@ -796,6 +822,237 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   );
 
   const svg = await satori(leaderboardHtml, {
+    width: 800,
+    height: calculatedHeight,
+    fonts: [
+      {
+        name: "Inter",
+        data: fontRegularBuffer!,
+        weight: 400,
+        style: "normal",
+      },
+      {
+        name: "Inter",
+        data: fontBoldBuffer!,
+        weight: 800,
+        style: "normal",
+      },
+    ],
+  });
+
+  const resvg = new Resvg(svg, {
+    fitTo: {
+      mode: "width",
+      value: 800,
+    },
+  });
+
+  const pngData = resvg.render();
+  return pngData.asPng();
+}
+
+export async function renderPopularGames(games: PopularGameCardItem[]): Promise<Uint8Array> {
+  await initRenderer();
+
+  const topGames = games.slice(0, 5);
+  const maxPlayers = Math.max(1, ...topGames.map((game) => game.players.length));
+  const rowHeight = 96;
+  const headerHeight = 170;
+  const bottomMargin = 34;
+  const calculatedHeight = headerHeight + topGames.length * rowHeight + bottomMargin;
+  const covers = await Promise.all(topGames.map((game) => fetchImageBase64(game.imageUrl)));
+  const pillColors = ["#2563eb", "#059669", "#b45309", "#9333ea", "#be123c"];
+
+  const popularHtml = (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        backgroundColor: "#070b19",
+        width: "800px",
+        height: `${calculatedHeight}px`,
+        fontFamily: "Inter",
+        color: "white",
+        padding: "34px 42px",
+        borderRadius: "28px",
+        backgroundImage: "radial-gradient(circle at 12% 8%, rgba(14, 165, 233, 0.22), transparent 42%), radial-gradient(circle at 88% 24%, rgba(168, 85, 247, 0.18), transparent 38%), radial-gradient(circle at 82% 96%, rgba(59, 130, 246, 0.20), transparent 42%)",
+        border: "1.5px solid rgba(255, 255, 255, 0.08)",
+        boxSizing: "border-box",
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", marginBottom: "28px" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: "4px" }}>
+          <span
+            style={{
+              fontSize: "42px",
+              fontWeight: "800",
+              color: "#dbeafe",
+              marginRight: "14px",
+            }}
+          >
+            BUDKA POPULAR GAMES
+          </span>
+          <CrownIcon size={38} />
+        </div>
+        <span style={{ fontSize: "15px", color: "#a5b4fc", fontWeight: "700", letterSpacing: "0px" }}>
+          ПОПУЛЯРНЫЕ ИГРЫ ГРУППЫ
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
+        {topGames.map((game, index) => {
+          const rank = index + 1;
+          const cover = covers[index];
+          const players = game.players.slice(0, 4);
+          const hiddenPlayers = Math.max(0, game.players.length - players.length);
+          const popularity = Math.max(10, Math.round((game.players.length / maxPlayers) * 100));
+
+          return (
+            <div
+              key={`${game.name}-${rank}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                width: "100%",
+                height: "78px",
+                padding: "10px 18px",
+                backgroundColor: rank === 1 ? "rgba(251, 191, 36, 0.045)" : "rgba(255, 255, 255, 0.025)",
+                border: rank === 1 ? "1.5px solid rgba(251, 191, 36, 0.28)" : "1px solid rgba(147, 197, 253, 0.16)",
+                borderRadius: "14px",
+                marginBottom: "18px",
+                boxSizing: "border-box",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  width: "54px",
+                  height: "54px",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  borderRadius: "50%",
+                  backgroundImage: rank === 1
+                    ? "linear-gradient(135deg, #facc15, #fb923c)"
+                    : "linear-gradient(135deg, #22d3ee, #8b5cf6)",
+                  color: rank === 1 ? "#422006" : "#eff6ff",
+                  fontSize: "24px",
+                  fontWeight: "800",
+                  border: rank === 1 ? "2px solid #fde68a" : "2px solid #67e8f9",
+                  marginRight: "18px",
+                }}
+              >
+                {rank}
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  width: "56px",
+                  height: "56px",
+                  borderRadius: "9px",
+                  backgroundColor: "#111827",
+                  overflow: "hidden",
+                  marginRight: "22px",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                }}
+              >
+                {cover ? (
+                  <img src={cover} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <AvatarPlaceholder label={game.name} fontSize={22} />
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", width: "345px", overflow: "hidden", marginRight: "22px" }}>
+                <span
+                  style={{
+                    fontSize: "22px",
+                    fontWeight: "800",
+                    color: "#f8fafc",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    marginBottom: "8px",
+                  }}
+                >
+                  {game.name}
+                </span>
+                <div style={{ display: "flex", alignItems: "center", width: "100%", overflow: "hidden" }}>
+                  {players.map((player, playerIndex) => (
+                    <div
+                      key={`${game.name}-${player}`}
+                      style={{
+                        display: "flex",
+                        maxWidth: "86px",
+                        padding: "3px 8px",
+                        borderRadius: "12px",
+                        backgroundColor: pillColors[playerIndex % pillColors.length],
+                        color: "#e0f2fe",
+                        fontSize: "11px",
+                        fontWeight: "700",
+                        marginRight: "6px",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {player}
+                      </span>
+                    </div>
+                  ))}
+                  {hiddenPlayers > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        padding: "3px 8px",
+                        borderRadius: "12px",
+                        backgroundColor: "#334155",
+                        color: "#bfdbfe",
+                        fontSize: "11px",
+                        fontWeight: "800",
+                      }}
+                    >
+                      +{hiddenPlayers}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, alignItems: "flex-end" }}>
+                <span style={{ fontSize: "12px", color: "#c4b5fd", fontWeight: "700", marginBottom: "8px" }}>
+                  Популярность
+                </span>
+                <div
+                  style={{
+                    display: "flex",
+                    width: "140px",
+                    height: "9px",
+                    backgroundColor: "rgba(148, 163, 184, 0.22)",
+                    borderRadius: "5px",
+                    overflow: "hidden",
+                    marginBottom: "8px",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      width: `${popularity}%`,
+                      height: "100%",
+                      backgroundImage: "linear-gradient(to right, #38bdf8, #8b5cf6)",
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: "13px", color: "#cbd5e1", fontWeight: "700" }}>
+                  {game.players.length} {pluralizeRu(game.players.length, ["участник", "участника", "участников"])}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const svg = await satori(popularHtml, {
     width: 800,
     height: calculatedHeight,
     fonts: [

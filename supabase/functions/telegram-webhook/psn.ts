@@ -56,6 +56,7 @@ export type PsnPlatinumTitle = {
 export type PsnPlayedGame = {
   key: string;
   name: string;
+  imageUrl: string | null;
   lastPlayedAt: string | null;
 };
 
@@ -69,6 +70,7 @@ export type PsnTrophyTitleGameSource = {
 
 type PsnTrophyTitle = {
   trophyTitleName?: string;
+  trophyTitleIconUrl?: string;
   trophyTitlePlatform?: string;
   npServiceName?: string;
   npCommunicationId?: string;
@@ -373,6 +375,7 @@ export class PsnService {
             games.set(key, {
               key,
               name,
+              imageUrl: title.trophyTitleIconUrl ?? null,
               lastPlayedAt
             });
           }

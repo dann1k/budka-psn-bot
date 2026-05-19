@@ -17,7 +17,7 @@ import {
   type PsnTrophyTitleGameSource
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
-import { renderGamerCard, renderLeaderboard } from "./renderer.tsx";
+import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
 
 type BotConfig = {
   botToken: string;
@@ -47,6 +47,7 @@ type PreferredAccount = {
 type PopularGameAccumulator = {
   key: string;
   name: string;
+  imageUrl: string | null;
   players: Map<number, string>;
   accounts: PopularDebugAccount[];
 };
@@ -1086,11 +1087,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const existing = popularGames.get(game.key) ?? {
           key: game.key,
           name: game.name,
+          imageUrl: game.imageUrl,
           players: new Map<number, string>(),
           accounts: accountHitsByGame.get(game.key) ?? []
         };
 
         existing.name = game.name;
+        existing.imageUrl ??= game.imageUrl;
         existing.accounts = accountHitsByGame.get(game.key) ?? existing.accounts;
         existing.players.set(user.userId, formatNonMentionTelegramLabel(user));
         popularGames.set(game.key, existing);
@@ -1135,6 +1138,32 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const debugAccountsWithoutMatch = normalizedDebugSearch
       ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
       : [];
+
+    if (!isDebug && ctx.replyWithPhoto) {
+      try {
+        const popularPng = await renderPopularGames(
+          topGames.map((game) => ({
+            name: game.name,
+            imageUrl: game.imageUrl,
+            players: [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"))
+          }))
+        );
+
+        await ctx.replyWithPhoto(new InputFile(popularPng, "popular-games.png"), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
+              }
+            }
+          : undefined
+        );
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Не удалось отрендерить карточку.";
+        await replyToCommand(ctx, `Не получилось собрать популярные игры: ${message}`);
+        return;
+      }
+    }
 
     const messages = chunkRichMessages([
       { text: "Популярные игры чата", entities: [] },
