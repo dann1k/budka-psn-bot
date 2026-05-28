@@ -1,0 +1,8 @@
+@resvg/resvg-wasm 2.6.2
+
+This directory includes the package WebAssembly binary `index_bg.wasm`,
+renamed to `resvg.wasm` for the Supabase Edge Function renderer.
+
+License: MPL-2.0
+Package: https://www.npmjs.com/package/@resvg/resvg-wasm
+Source: https://github.com/yisibl/resvg-js

@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard } from "npm:grammy@1.41.1/web";
+import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "npm:grammy@1.41.1/web";
 import type { MessageEntity } from "npm:grammy@1.41.1/types";
 import {
   formatLeaderboardRow,
@@ -17,13 +17,14 @@ import {
   type PsnTrophyTitleGameSource
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
+import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
 
 type BotConfig = {
   botToken: string;
   emojis: EmojiConfig;
 };
 
-type AggregatedPlayer = {
+export type AggregatedPlayer = {
   user: LinkedUser;
   accountLinks: LinkedAccount[];
   accountSummaries: PsnSummary[];
@@ -46,6 +47,7 @@ type PreferredAccount = {
 type PopularGameAccumulator = {
   key: string;
   name: string;
+  imageUrl: string | null;
   players: Map<number, string>;
   accounts: PopularDebugAccount[];
 };
@@ -82,7 +84,7 @@ type TelegramActionContext = {
     text?: string;
   };
   reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
-  replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+  replyWithPhoto?: (photo: string | InputFile, other?: Record<string, unknown>) => Promise<unknown>;
 };
 
 type MenuAction =
@@ -243,7 +245,7 @@ async function replyToCommand(
 async function replySummary(
   ctx: {
     reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
-    replyWithPhoto?: (photo: string, other?: Record<string, unknown>) => Promise<unknown>;
+    replyWithPhoto?: (photo: string | InputFile, other?: Record<string, unknown>) => Promise<unknown>;
     msg?: { message_id: number };
   },
   text: string,
@@ -717,32 +719,35 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
         const summary = await psnService.getSummaryByOnlineId(targetArg);
-        const summaryMessage = formatSummary(
-          {
-            primaryAccount: {
-              onlineId: summary.onlineId,
-              regionCode: summary.region?.code,
-              hasPlus: summary.hasPlus,
-              status: summary.presence.status,
-              lastOnline: summary.presence.lastOnline,
-              currentGames: summary.presence.currentGames,
-              recentGames: summary.recentGames
-            },
-            otherAccounts: [],
-            level: summary.level,
-            progress: summary.progress,
-            trophies: summary.trophies
+        const mockPlayer: AggregatedPlayer = {
+          user: {
+            userId: 0,
+            chatId: ctx.chat.id,
+            username: null,
+            displayName: "Данные из PSN",
+            defaultPsnOnlineId: null
           },
-          config.emojis
-        );
-        const prefix = "Данные напрямую из PSN\n\n";
+          accountLinks: [],
+          accountSummaries: [summary],
+          accounts: [],
+          level: summary.level,
+          progress: summary.progress,
+          trophies: summary.trophies
+        };
 
-        await replySummary(
-          ctx,
-          `${prefix}${summaryMessage.text}`,
-          shiftEntities(summaryMessage.entities, prefix),
-          summary.avatarUrl
-        );
+        const cardPng = await renderGamerCard(mockPlayer, summary);
+        if (ctx.replyWithPhoto) {
+          await ctx.replyWithPhoto(new InputFile(cardPng, `${summary.onlineId}_card.png`), ctx.msg
+            ? {
+                reply_parameters: {
+                  message_id: ctx.msg.message_id
+                }
+              }
+            : undefined
+          );
+        } else {
+          await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+        }
       } catch (error) {
         const message = formatPsnError(error, targetArg);
         await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -765,23 +770,20 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     try {
       const aggregated = await loadAggregatedPlayer(targetUser);
       const preferred = pickPreferredAccount(aggregated);
-      const summaryMessage = formatSummary(
-        {
-          primaryAccount: aggregated.accounts[preferred.index],
-          otherAccounts: aggregated.accounts.filter((_, index) => index !== preferred.index),
-          level: aggregated.level,
-          progress: aggregated.progress,
-          trophies: aggregated.trophies
-        },
-        config.emojis
-      );
-      const prefix = `${formatTelegramName(targetUser)}\n\n`;
-      await replySummary(
-        ctx,
-        `${prefix}${summaryMessage.text}`,
-        shiftEntities(summaryMessage.entities, prefix),
-        preferred.summary.avatarUrl
-      );
+      const cardPng = await renderGamerCard(aggregated, preferred.summary);
+
+      if (ctx.replyWithPhoto) {
+        await ctx.replyWithPhoto(new InputFile(cardPng, `${preferred.summary.onlineId}_card.png`), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
+              }
+            }
+          : undefined
+        );
+      } else {
+        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+      }
     } catch (error) {
       const message = formatPsnError(error);
       await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
@@ -1085,11 +1087,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const existing = popularGames.get(game.key) ?? {
           key: game.key,
           name: game.name,
+          imageUrl: game.imageUrl,
           players: new Map<number, string>(),
           accounts: accountHitsByGame.get(game.key) ?? []
         };
 
         existing.name = game.name;
+        existing.imageUrl ??= game.imageUrl;
         existing.accounts = accountHitsByGame.get(game.key) ?? existing.accounts;
         existing.players.set(user.userId, formatNonMentionTelegramLabel(user));
         popularGames.set(game.key, existing);
@@ -1134,6 +1138,44 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const debugAccountsWithoutMatch = normalizedDebugSearch
       ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
       : [];
+
+    if (!isDebug && ctx.replyWithPhoto) {
+      const renderInput = topGames.map((game) => ({
+        name: game.name,
+        imageUrl: game.imageUrl,
+        players: [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"))
+      }));
+      const totalPlayers = renderInput.reduce((sum, g) => sum + g.players.length, 0);
+      console.log(
+        `[popular] start render: games=${renderInput.length} totalPlayers=${totalPlayers}`,
+      );
+
+      try {
+        const renderStartedAt = Date.now();
+        const popularPng = await renderPopularGames(renderInput);
+        const renderDurationMs = Date.now() - renderStartedAt;
+        console.log(
+          `[popular] render done: bytes=${popularPng.byteLength} durationMs=${renderDurationMs}`,
+        );
+
+        const uploadStartedAt = Date.now();
+        await ctx.replyWithPhoto(new InputFile(popularPng, "popular-games.png"), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
+              }
+            }
+          : undefined
+        );
+        console.log(`[popular] upload done: durationMs=${Date.now() - uploadStartedAt}`);
+        return;
+      } catch (error) {
+        console.error("[popular] render or upload failed:", error);
+        const message = error instanceof Error ? error.message : "Не удалось отрендерить карточку.";
+        await replyToCommand(ctx, `Не получилось собрать популярные игры: ${message}`);
+        return;
+      }
+    }
 
     const messages = chunkRichMessages([
       { text: "Популярные игры чата", entities: [] },
@@ -1211,49 +1253,42 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     try {
+      const aggregateStartedAt = Date.now();
       const aggregatedPlayers = await Promise.all(users.map((user) => loadAggregatedPlayer(user)));
+      console.log(
+        `[table] aggregated players=${aggregatedPlayers.length} ms=${Date.now() - aggregateStartedAt}`,
+      );
 
-      const sorted = aggregatedPlayers
-        .sort((a, b) => {
-          if (b.level !== a.level) {
-            return b.level - a.level;
-          }
+      const sorted = aggregatedPlayers.sort((a, b) => {
+        if (b.level !== a.level) {
+          return b.level - a.level;
+        }
 
-          return getTrophyWeight(b) - getTrophyWeight(a);
-        })
-        .map((player) =>
-          formatLeaderboardRow(
-            {
-              telegramLabel: formatTelegramName(player.user),
-              accounts: player.accounts,
-              level: player.level,
-              trophies: player.trophies
-            },
-            config.emojis
-          )
-        );
+        return getTrophyWeight(b) - getTrophyWeight(a);
+      });
 
-      const messages = chunkRichMessages([
-        { text: `Таблица группы по PSN (${sorted.length}):`, entities: [] },
-        ...sorted
-      ]);
+      const renderStartedAt = Date.now();
+      const tablePng = await renderLeaderboard(sorted);
+      console.log(
+        `[table] render done bytes=${tablePng.byteLength} ms=${Date.now() - renderStartedAt}`,
+      );
 
-      for (const [index, message] of messages.entries()) {
-        await ctx.reply(
-          message.text,
-          index === 0 && ctx.msg
-            ? {
-                entities: message.entities,
-                reply_parameters: {
-                  message_id: ctx.msg.message_id
-                }
+      if (ctx.replyWithPhoto) {
+        const uploadStartedAt = Date.now();
+        await ctx.replyWithPhoto(new InputFile(tablePng, "leaderboard.png"), ctx.msg
+          ? {
+              reply_parameters: {
+                message_id: ctx.msg.message_id
               }
-            : {
-                entities: message.entities
-              }
+            }
+          : undefined
         );
+        console.log(`[table] upload done ms=${Date.now() - uploadStartedAt}`);
+      } else {
+        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
       }
     } catch (error) {
+      console.error("[table] failed:", error);
       const message =
         error instanceof Error ? formatPsnError(error) : "Не удалось получить данные части профилей.";
       await replyToCommand(ctx, `Не получилось собрать таблицу: ${message}`);
@@ -1456,6 +1491,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   });
 
   bot.callbackQuery(/^menu:/, async (ctx) => {
+    const callbackReceivedAt = Date.now();
     const callback = parseMenuCallbackData(ctx.callbackQuery.data);
     if (!callback) {
       await ctx.answerCallbackQuery({
@@ -1479,7 +1515,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
+    const answerStartedAt = Date.now();
     await ctx.answerCallbackQuery();
+    console.log(
+      `[menu] action=${callback.action} answerCallbackQuery ms=${Date.now() - answerStartedAt} sinceCallback=${Date.now() - callbackReceivedAt}`,
+    );
 
     if (callback.action === "close") {
       try {
@@ -1509,6 +1549,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     });
     const loadingMessageId = loadingMessage.message_id;
 
+    const actionStartedAt = Date.now();
     try {
       switch (callback.action) {
         case "summary":
@@ -1537,6 +1578,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           return;
       }
     } finally {
+      console.log(
+        `[menu] action=${callback.action} handler totalMs=${Date.now() - actionStartedAt} sinceCallback=${Date.now() - callbackReceivedAt}`,
+      );
       try {
         await ctx.api.deleteMessage(ctx.chat.id, loadingMessageId);
       } catch {

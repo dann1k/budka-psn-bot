@@ -1,6 +1,12 @@
 import * as psnApi from "npm:psn-api@2.18.0";
 import type { PersistedPsnAuthState, PsnAuthStore } from "./psn-auth-store.ts";
 
+export type PsnPlayedGameRich = {
+  name: string;
+  imageUrl: string | null;
+  playDuration: string;
+};
+
 export type PsnSummary = {
   onlineId: string;
   accountId: string;
@@ -13,6 +19,7 @@ export type PsnSummary = {
     currentGames: string[];
   };
   recentGames: string[];
+  recentGamesRich?: PsnPlayedGameRich[];
   region: {
     code: string;
     name: string;
@@ -49,6 +56,7 @@ export type PsnPlatinumTitle = {
 export type PsnPlayedGame = {
   key: string;
   name: string;
+  imageUrl: string | null;
   lastPlayedAt: string | null;
 };
 
@@ -62,6 +70,7 @@ export type PsnTrophyTitleGameSource = {
 
 type PsnTrophyTitle = {
   trophyTitleName?: string;
+  trophyTitleIconUrl?: string;
   trophyTitlePlatform?: string;
   npServiceName?: string;
   npCommunicationId?: string;
@@ -168,6 +177,27 @@ function normalizeGameName(value: string): string {
   return value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 }
 
+const AVATAR_SIZE_PRIORITY: Record<string, number> = { xl: 4, l: 3, m: 2, s: 1 };
+
+function pickLargestAvatarUrl(
+  avatarUrls: ReadonlyArray<{ size?: string | null; avatarUrl?: string | null }> | undefined,
+): string | null {
+  if (!avatarUrls?.length) return null;
+
+  let best: { url: string; rank: number } | null = null;
+
+  for (const entry of avatarUrls) {
+    const url = entry?.avatarUrl;
+    if (!url) continue;
+    const rank = AVATAR_SIZE_PRIORITY[entry?.size?.toLowerCase() ?? ""] ?? 0;
+    if (!best || rank > best.rank) {
+      best = { url, rank };
+    }
+  }
+
+  return best?.url ?? null;
+}
+
 type AuthState = {
   accessToken: string;
   refreshToken: string;
@@ -233,11 +263,11 @@ export class PsnService {
   async getSummaryByOnlineId(onlineId: string): Promise<PsnSummary> {
     return await this.withAuthRetry(async (accessToken) => {
       const { profile, profileUrl } = await this.getResolvedProfile(accessToken, onlineId);
-      const [summary, regionInfo, presence, playedGames] = await Promise.all([
+      const [summary, regionInfo, presence, playedGamesRich] = await Promise.all([
         psnApi.getUserTrophyProfileSummary({ accessToken }, profile.accountId),
         psnApi.getUserRegion({ accessToken }, profile.onlineId ?? onlineId, ["ru", "en"]),
         this.getPresenceSafe(accessToken, profile.accountId),
-        this.getPlayedGamesSafe(accessToken, profile.accountId)
+        this.getPlayedGamesRichSafe(accessToken, profile.accountId)
       ]);
       const region = regionInfo
         ? {
@@ -262,10 +292,11 @@ export class PsnService {
         onlineId: profile.onlineId ?? onlineId,
         accountId: profile.accountId,
         profileUrl,
-        avatarUrl: profile.avatarUrls?.[0]?.avatarUrl ?? null,
+        avatarUrl: pickLargestAvatarUrl(profile.avatarUrls),
         hasPlus: profile.plus === 1,
         presence,
-        recentGames: playedGames,
+        recentGames: playedGamesRich.map((g) => g.name),
+        recentGamesRich: playedGamesRich,
         region,
         level: normalizeNumber(summary.trophyLevel, normalizeNumber(profileTrophySummary?.level)),
         progress: normalizeNumber(summary.progress, normalizeNumber(profileTrophySummary?.progress)),
@@ -365,6 +396,7 @@ export class PsnService {
             games.set(key, {
               key,
               name,
+              imageUrl: title.trophyTitleIconUrl ?? null,
               lastPlayedAt
             });
           }
@@ -452,6 +484,24 @@ export class PsnService {
         .slice(0, 3)
         .map((title) => title.localizedName || title.name)
         .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  private async getPlayedGamesRichSafe(accessToken: string, accountId: string): Promise<PsnPlayedGameRich[]> {
+    try {
+      const response = await psnApi.getUserPlayedGames(
+        { accessToken },
+        accountId,
+        { limit: 3, offset: 0, categories: "ps5_native_game,ps4_game,pspc_game,unknown" }
+      );
+
+      return (response.titles || []).slice(0, 3).map((title) => ({
+        name: title.localizedName || title.name,
+        imageUrl: title.localizedImageUrl || title.imageUrl || title.concept?.media?.images?.[0]?.url || null,
+        playDuration: title.playDuration || "PT0H"
+      }));
     } catch {
       return [];
     }
