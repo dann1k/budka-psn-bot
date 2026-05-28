@@ -71,12 +71,51 @@ jobs:
       - name: Configure Telegram webhook
         run: |
           WEBHOOK_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook"
+          TG_API="https://api.telegram.org/bot${BUDKA_PSN_TELEGRAM_BOT_TOKEN}"
+
+          # Force Telegram to drop any cached secret_token by deleting the
+          # webhook first. setWebhook with the same URL is a no-op for
+          # secret_token rotation, which has caused 401 drift in the past.
+          curl --fail --silent --show-error \
+            --request POST "${TG_API}/deleteWebhook" \
+            --header "Content-Type: application/json" \
+            --data '{"drop_pending_updates": false}'
+          echo
+
           PAYLOAD="$(jq -nc \
             --arg url "$WEBHOOK_URL" \
             --arg secret "$BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET" \
             '{url: $url, secret_token: $secret, allowed_updates: ["message", "callback_query"], drop_pending_updates: false}')"
 
           curl --fail --silent --show-error \
-            --request POST "https://api.telegram.org/bot${BUDKA_PSN_TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --request POST "${TG_API}/setWebhook" \
             --header "Content-Type: application/json" \
             --data "$PAYLOAD"
+          echo
+
+      - name: Verify Telegram webhook
+        run: |
+          TG_API="https://api.telegram.org/bot${BUDKA_PSN_TELEGRAM_BOT_TOKEN}"
+          EXPECTED_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-webhook"
+          DEPLOY_STARTED_AT="$(date -u +%s)"
+
+          # Give Telegram a few seconds to attempt a delivery so that any
+          # secret_token mismatch surfaces as last_error_date in getWebhookInfo.
+          sleep 10
+
+          INFO="$(curl --fail --silent --show-error "${TG_API}/getWebhookInfo")"
+          echo "$INFO" | jq .
+
+          ACTUAL_URL="$(echo "$INFO" | jq -r '.result.url')"
+          LAST_ERR_DATE="$(echo "$INFO" | jq -r '.result.last_error_date // 0')"
+          LAST_ERR_MSG="$(echo "$INFO" | jq -r '.result.last_error_message // ""')"
+
+          if [ "$ACTUAL_URL" != "$EXPECTED_URL" ]; then
+            echo "::error::webhook url mismatch: expected=$EXPECTED_URL actual=$ACTUAL_URL"
+            exit 1
+          fi
+
+          if [ "$LAST_ERR_DATE" -ge "$DEPLOY_STARTED_AT" ]; then
+            echo "::error::telegram reported a webhook delivery error after deploy: $LAST_ERR_MSG"
+            exit 1
+          fi
