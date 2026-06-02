@@ -8,8 +8,10 @@ import type { AggregatedPlayer } from "./bot.ts";
 import {
   getInterBoldBuffer,
   getInterRegularBuffer,
+  getPlayStationPlusImageDataUrl,
   getResvgWasmBuffer,
   getTrophyImageDataUrl,
+  preloadPlayStationPlusImage,
   preloadTrophyImages,
 } from "./renderer-assets.ts";
 
@@ -39,6 +41,7 @@ const RENDER_SCALE = 1.2;
 const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
 const SUMMARY_RENDER_SCALE = 1.4;
 const SUMMARY_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * SUMMARY_RENDER_SCALE);
+const CARD_BACKGROUND = "#070b19";
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
 // given Satori-rendered Inter Bold 11px pills with 8px horizontal padding
@@ -143,15 +146,15 @@ const TrophyIcon = ({ type, size = 20 }: { type: "platinum" | "gold" | "silver" 
 };
 
 const PlusIcon = ({ size = 22 }: { size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="#facc15"
-    style={{ display: "flex" }}
-  >
-    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-6H5v-2h6V5h2v6h6v2h-6v6z" />
-  </svg>
+  <img
+    src={getPlayStationPlusImageDataUrl()}
+    style={{
+      display: "flex",
+      width: `${size}px`,
+      height: `${size}px`,
+      objectFit: "contain",
+    }}
+  />
 );
 
 const CrownIcon = ({ size = 28 }: { size?: number }) => (
@@ -285,6 +288,9 @@ function getStatusBadge(status: string | undefined, currentGames: string[], last
 
 export async function renderGamerCard(player: AggregatedPlayer, preferredSummary: PsnSummary): Promise<Uint8Array> {
   await initRenderer();
+  if (preferredSummary.hasPlus) {
+    await preloadPlayStationPlusImage();
+  }
 
   // Fetch images in parallel
   const [avatarBase64, flagBase64, ...gamesBase64] = await Promise.all([
@@ -306,13 +312,12 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
       style={{
         display: "flex",
         flexDirection: "column",
-        backgroundColor: "#070b19",
+        backgroundColor: CARD_BACKGROUND,
         width: "800px",
         height: "550px",
         fontFamily: "Inter",
         color: "white",
         padding: "35px",
-        borderRadius: "28px",
         backgroundImage: "radial-gradient(circle at 85% 15%, rgba(59, 130, 246, 0.18), transparent 50%), radial-gradient(circle at 15% 85%, rgba(139, 92, 246, 0.12), transparent 50%)",
         border: "1.5px solid rgba(255, 255, 255, 0.08)",
         boxSizing: "border-box",
@@ -615,13 +620,12 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
       style={{
         display: "flex",
         flexDirection: "column",
-        backgroundColor: "#070b19",
+        backgroundColor: CARD_BACKGROUND,
         width: "800px",
         height: `${calculatedHeight}px`,
         fontFamily: "Inter",
         color: "white",
         padding: "35px",
-        borderRadius: "28px",
         backgroundImage: "radial-gradient(circle at 50% 10%, rgba(59, 130, 246, 0.15), transparent 50%), radial-gradient(circle at 10% 90%, rgba(139, 92, 246, 0.08), transparent 50%)",
         border: "1.5px solid rgba(255, 255, 255, 0.08)",
         boxSizing: "border-box",
@@ -911,13 +915,12 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
       style={{
         display: "flex",
         flexDirection: "column",
-        backgroundColor: "#070b19",
+        backgroundColor: CARD_BACKGROUND,
         width: "800px",
         height: `${calculatedHeight}px`,
         fontFamily: "Inter",
         color: "white",
         padding: "34px 42px",
-        borderRadius: "28px",
         backgroundImage: "radial-gradient(circle at 12% 8%, rgba(14, 165, 233, 0.22), transparent 42%), radial-gradient(circle at 88% 24%, rgba(168, 85, 247, 0.18), transparent 38%), radial-gradient(circle at 82% 96%, rgba(59, 130, 246, 0.20), transparent 42%)",
         border: "1.5px solid rgba(255, 255, 255, 0.08)",
         boxSizing: "border-box",

@@ -85,6 +85,8 @@ const TROPHY_FILE_NAMES: Record<TrophyKind, string> = {
 
 const trophyDataUrls: Partial<Record<TrophyKind, string>> = {};
 let trophyPreloadPromise: Promise<void> | null = null;
+let playStationPlusDataUrl: string | null = null;
+let playStationPlusPreloadPromise: Promise<void> | null = null;
 
 export function preloadTrophyImages(): Promise<void> {
   trophyPreloadPromise ??= (async () => {
@@ -109,4 +111,20 @@ export function getTrophyImageDataUrl(type: TrophyKind): string {
   }
 
   return dataUrl;
+}
+
+export function preloadPlayStationPlusImage(): Promise<void> {
+  playStationPlusPreloadPromise ??= (async () => {
+    playStationPlusDataUrl = await fetchAssetDataUrl("playstation-plus.png", "image/png");
+  })();
+
+  return playStationPlusPreloadPromise;
+}
+
+export function getPlayStationPlusImageDataUrl(): string {
+  if (!playStationPlusDataUrl) {
+    throw new Error("PlayStation Plus image was not preloaded; call preloadPlayStationPlusImage() first");
+  }
+
+  return playStationPlusDataUrl;
 }

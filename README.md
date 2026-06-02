@@ -17,7 +17,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `supabase/functions/telegram-webhook/psn-auth-store.ts` — зашифрованное хранение PSN access/refresh tokens в Supabase.
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
-- `supabase/functions/telegram-webhook/renderer-assets.ts` — ленивая загрузка ассетов (Inter, `resvg.wasm`, иконки трофеев) из публичного бакета Supabase Storage `renderer-assets` на cold start; буферы кэшируются в памяти изолята. См. ниже раздел «Настройка Supabase Storage».
+- `supabase/functions/telegram-webhook/renderer-assets.ts` — ленивая загрузка ассетов (Inter, `resvg.wasm`, иконки трофеев, логотип PS+) из приватного бакета Supabase Storage `renderer-assets`; буферы кэшируются в памяти изолята. См. ниже раздел «Настройка Supabase Storage».
 - `renderer-assets-source/` — исходные renderer assets и их лицензии. Файлы из этой папки нужно вручную загружать в бакет `renderer-assets` при обновлении. В Supabase deploy bundle папка не попадает.
 - `supabase/migrations/` — схема Postgres.
 - `.github/workflows/deploy-supabase.yml` — автодеплой на push в `main`.
@@ -127,7 +127,7 @@ BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 
 ## Настройка Supabase Storage
 
-Edge Function на cold start подтягивает шрифты, `resvg.wasm` и PNG-иконки трофеев из приватного бакета Supabase Storage. Функция ходит туда с `service_role` ключом, который Supabase сам инжектит в env Edge Function как `SUPABASE_SERVICE_ROLE_KEY` (этот ключ обходит RLS, отдельные политики на `storage.objects` не нужны). Без бакета функция стартует с ошибкой `Failed to fetch renderer asset ...`.
+Edge Function лениво подтягивает шрифты, `resvg.wasm`, PNG-иконки трофеев и логотип PS+ из приватного бакета Supabase Storage. Функция ходит туда с `service_role` ключом, который Supabase сам инжектит в env Edge Function как `SUPABASE_SERVICE_ROLE_KEY` (этот ключ обходит RLS, отдельные политики на `storage.objects` не нужны). Без бакета функция стартует с ошибкой `Failed to fetch renderer asset ...`.
 
 1. Supabase Dashboard -> Storage -> `New bucket`.
 2. Name: `renderer-assets`, флажок `Public bucket` **выключен**, остальные настройки по умолчанию.
@@ -140,6 +140,7 @@ Edge Function на cold start подтягивает шрифты, `resvg.wasm` 
    - `trophy-gold.png`
    - `trophy-silver.png`
    - `trophy-bronze.png`
+   - `playstation-plus.png`
 5. Проверить доступ из терминала: `curl -I -H "Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>" "https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/renderer-assets/resvg.wasm"` — должен вернуть `HTTP/2 200`. Без заголовка тот же URL должен возвращать `400/404` — это и есть закрытый доступ.
 
 При обновлении шрифтов, wasm или иконок: положить новую версию в `renderer-assets-source/` (для истории и лицензий) и перезалить тот же файл в бакет с тем же именем. Имена в бакете строго совпадают с именами файлов в `renderer-assets-source/`.
