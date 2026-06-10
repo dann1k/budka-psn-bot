@@ -202,9 +202,151 @@ type AuthState = {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  refreshTokenExpiresAt: number;
 };
 
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+// Rotate the refresh token once it is within this window of its ~60 day expiry.
+const REFRESH_TOKEN_RENEW_MARGIN_MS = 7 * 24 * 60 * 60_000;
+// Fallback refresh-token lifetime when PSN omits refresh_token_expires_in.
+const DEFAULT_REFRESH_TOKEN_TTL_MS = 55 * 24 * 60 * 60_000;
+const TOKEN_REQUEST_MAX_ATTEMPTS = 3;
+const TOKEN_REQUEST_BASE_DELAY_MS = 300;
+
+const PSN_AUTH_TOKEN_URL = "https://ca.account.sony.com/api/authz/v3/oauth/token";
+const PSN_REDIRECT_URI = "com.scee.psxandroid.scecompcall://redirect";
+// Public OAuth client credentials of the official PSN Android app (the same values
+// the vendored psn-api uses). Safe to inline; they are not user secrets.
+const PSN_CLIENT_AUTHORIZATION =
+  "Basic MDk1MTUxNTktNzIzNy00MzcwLTliNDAtMzgwNmU2N2MwODkxOnVjUGprYTV0bnRCMktxc1A=";
+
+/** Raised when PSN rejects the refresh token / access code as permanently invalid. */
+export class PsnInvalidGrantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PsnInvalidGrantError";
+  }
+}
+
+/** Raised for retryable PSN auth failures (network, 5xx, 429, malformed body). */
+export class PsnTransientAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PsnTransientAuthError";
+  }
+}
+
+/** Raised when the NPSSO cookie itself is invalid or expired. */
+export class PsnNpssoInvalidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PsnNpssoInvalidError";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type RawTokenResponse = {
+  access_token?: unknown;
+  refresh_token?: unknown;
+  expires_in?: unknown;
+  refresh_token_expires_in?: unknown;
+  error?: unknown;
+  error_description?: unknown;
+};
+
+function isInvalidGrantReason(reason: string): boolean {
+  return (
+    reason === "invalid_grant" ||
+    reason === "invalid_request" ||
+    reason === "unauthorized_client" ||
+    reason === "access_denied"
+  );
+}
+
+/**
+ * Performs a PSN OAuth /token request and ALWAYS validates the HTTP response.
+ * The vendored psn-api exchange* helpers skip the res.ok check, so an error
+ * response is silently parsed as success (undefined fields -> NaN expiry ->
+ * corrupted/abandoned auth state, then an eager fall-through to the NPSSO escape
+ * hatch). This wrapper turns failures into typed errors so the caller can tell a
+ * permanently dead token apart from a transient blip.
+ */
+async function requestAuthTokens(body: URLSearchParams): Promise<AuthState> {
+  let response: Response;
+
+  try {
+    response = await fetch(PSN_AUTH_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: PSN_CLIENT_AUTHORIZATION
+      },
+      body: body.toString()
+    });
+  } catch (error) {
+    throw new PsnTransientAuthError(
+      `PSN token request network failure: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const rawText = await response.text();
+  let parsed: RawTokenResponse = {};
+
+  if (rawText) {
+    try {
+      parsed = JSON.parse(rawText) as RawTokenResponse;
+    } catch {
+      parsed = {};
+    }
+  }
+
+  if (!response.ok) {
+    const reason = typeof parsed.error === "string" ? parsed.error : "unknown_error";
+    const description =
+      typeof parsed.error_description === "string" ? parsed.error_description : rawText.slice(0, 200);
+
+    if ((response.status === 400 || response.status === 401) && isInvalidGrantReason(reason)) {
+      throw new PsnInvalidGrantError(`PSN rejected token (${response.status} ${reason}): ${description}`);
+    }
+
+    throw new PsnTransientAuthError(`PSN token endpoint error (${response.status} ${reason}): ${description}`);
+  }
+
+  const accessToken = parsed.access_token;
+  const refreshToken = parsed.refresh_token;
+  const expiresIn = parsed.expires_in;
+
+  if (
+    typeof accessToken !== "string" ||
+    accessToken.length === 0 ||
+    typeof refreshToken !== "string" ||
+    refreshToken.length === 0 ||
+    typeof expiresIn !== "number" ||
+    !Number.isFinite(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    throw new PsnTransientAuthError(`PSN token response missing required fields: ${rawText.slice(0, 200)}`);
+  }
+
+  const now = Date.now();
+  const refreshTokenExpiresIn = parsed.refresh_token_expires_in;
+  const refreshTokenTtlMs =
+    typeof refreshTokenExpiresIn === "number" &&
+    Number.isFinite(refreshTokenExpiresIn) &&
+    refreshTokenExpiresIn > 0
+      ? refreshTokenExpiresIn * 1000
+      : DEFAULT_REFRESH_TOKEN_TTL_MS;
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt: now + expiresIn * 1000,
+    refreshTokenExpiresAt: now + refreshTokenTtlMs
+  };
+}
 
 function getErrorStatus(error: unknown): number | null {
   if (!error || typeof error !== "object") {
@@ -254,6 +396,7 @@ function isPsnAuthError(error: unknown): boolean {
 
 export class PsnService {
   private authState: AuthState | null = null;
+  private refreshInFlight: Promise<AuthState> | null = null;
 
   constructor(
     private readonly npsso: string,
@@ -507,8 +650,21 @@ export class PsnService {
     }
   }
 
-  private isFresh(state: AuthState, now = Date.now()): boolean {
-    return state.expiresAt - TOKEN_REFRESH_MARGIN_MS > now;
+  private isAccessFresh(state: AuthState, now = Date.now()): boolean {
+    return Number.isFinite(state.expiresAt) && state.expiresAt - TOKEN_REFRESH_MARGIN_MS > now;
+  }
+
+  private refreshTokenNeedsRotation(state: AuthState, now = Date.now()): boolean {
+    // Unknown expiry (legacy rows / PSN omitted it) -> rotate to learn the window.
+    if (!Number.isFinite(state.refreshTokenExpiresAt)) {
+      return true;
+    }
+
+    return state.refreshTokenExpiresAt - REFRESH_TOKEN_RENEW_MARGIN_MS <= now;
+  }
+
+  private isUsable(state: AuthState, now = Date.now()): boolean {
+    return this.isAccessFresh(state, now) && !this.refreshTokenNeedsRotation(state, now);
   }
 
   private async withAuthRetry<T>(operation: (accessToken: string) => Promise<T>): Promise<T> {
@@ -530,64 +686,215 @@ export class PsnService {
   private async getAuthorization(options: { forceRefresh?: boolean } = {}): Promise<{ accessToken: string }> {
     const now = Date.now();
 
-    if (!options.forceRefresh && this.authState && this.isFresh(this.authState, now)) {
+    if (!options.forceRefresh && this.authState && this.isUsable(this.authState, now)) {
       return { accessToken: this.authState.accessToken };
     }
 
     const persistedAuthState = await this.authStore.load();
 
-    if (!options.forceRefresh && persistedAuthState && this.isFresh(persistedAuthState, now)) {
+    if (!options.forceRefresh && persistedAuthState && this.isUsable(persistedAuthState, now)) {
       this.authState = persistedAuthState;
       return { accessToken: persistedAuthState.accessToken };
     }
 
-    const refreshToken = this.authState?.refreshToken ?? persistedAuthState?.refreshToken;
+    // We must refresh (or bootstrap). Remember whether we still hold a valid access
+    // token: if so, a *transient* failure while proactively rotating the refresh
+    // token must NOT fail the request — we can keep using the still-fresh token.
+    const current = this.authState && Number.isFinite(this.authState.expiresAt) ? this.authState : persistedAuthState;
+    const accessStillFresh = !options.forceRefresh && current != null && this.isAccessFresh(current, now);
 
-    if (refreshToken) {
+    try {
+      const authState = await this.runRefresh(persistedAuthState);
+      return { accessToken: authState.accessToken };
+    } catch (error) {
+      if (accessStillFresh && current && error instanceof PsnTransientAuthError) {
+        console.warn(
+          `[psn-auth] proactive refresh-token rotation failed transiently; using still-fresh access token: ${error.message}`
+        );
+        this.authState = current;
+        return { accessToken: current.accessToken };
+      }
+
+      throw error;
+    }
+  }
+
+  // Collapse concurrent refreshes within this isolate into a single network call so
+  // two simultaneous requests do not both burn (and rotate) the single-use token.
+  private runRefresh(persistedAuthState: PersistedPsnAuthState | null): Promise<AuthState> {
+    if (!this.refreshInFlight) {
+      this.refreshInFlight = this.establishAuthorization(persistedAuthState).finally(() => {
+        this.refreshInFlight = null;
+      });
+    }
+
+    return this.refreshInFlight;
+  }
+
+  private async establishAuthorization(persistedAuthState: PersistedPsnAuthState | null): Promise<AuthState> {
+    const refreshToken = this.authState?.refreshToken ?? persistedAuthState?.refreshToken ?? null;
+
+    if (refreshToken && refreshToken.trim().length > 0) {
       try {
         const refreshed = await this.refreshAuthorization(refreshToken);
-        return { accessToken: refreshed.accessToken };
-      } catch {
-        this.authState = null;
-        const updatedPersistedAuthState = await this.authStore.load();
-
-        if (updatedPersistedAuthState && this.isFresh(updatedPersistedAuthState)) {
-          this.authState = updatedPersistedAuthState;
-          return { accessToken: updatedPersistedAuthState.accessToken };
+        console.log("[psn-auth] access token refreshed via refresh token");
+        return refreshed;
+      } catch (error) {
+        if (error instanceof PsnInvalidGrantError) {
+          // The refresh token is dead. A concurrent isolate may have just rotated it
+          // (PSN refresh tokens are single-use), so reload and adopt a newer one
+          // before resorting to the NPSSO bootstrap.
+          const reloaded = await this.authStore.load();
+          if (
+            reloaded?.refreshToken &&
+            reloaded.refreshToken.trim().length > 0 &&
+            reloaded.refreshToken !== refreshToken
+          ) {
+            try {
+              const refreshed = await this.refreshAuthorization(reloaded.refreshToken);
+              console.log("[psn-auth] adopted refresh token rotated by another instance");
+              return refreshed;
+            } catch (innerError) {
+              if (!(innerError instanceof PsnInvalidGrantError)) {
+                throw innerError;
+              }
+              console.error(`[psn-auth] reloaded refresh token also invalid: ${innerError.message}`);
+            }
+          }
+          console.error(
+            `[psn-auth] refresh token permanently invalid; bootstrapping from NPSSO: ${error.message}`
+          );
+        } else {
+          // Transient failure (already retried with backoff). Never burn the NPSSO
+          // escape hatch on a momentary PSN/network hiccup.
+          console.error(
+            `[psn-auth] transient refresh failure after retries; not falling back to NPSSO: ${(error as Error).message}`
+          );
+          throw error;
         }
+      }
+    } else {
+      console.log("[psn-auth] no usable refresh token; bootstrapping from NPSSO");
+    }
+
+    const bootstrapped = await this.createAuthorizationFromNpsso();
+    console.log("[psn-auth] auth state bootstrapped from NPSSO");
+    return bootstrapped;
+  }
+
+  /**
+   * Proactively rotates the refresh token to reset its ~60 day lifetime. Intended to
+   * be triggered by a scheduled keep-alive so the bot survives indefinitely even with
+   * zero user traffic. Non-destructive: a transient failure leaves the existing valid
+   * token in place and never falls back to NPSSO.
+   */
+  async ensureFreshAuthorization(): Promise<{ status: string; refreshTokenExpiresAt: number | null }> {
+    const persistedAuthState = await this.authStore.load();
+    const refreshToken = this.authState?.refreshToken ?? persistedAuthState?.refreshToken ?? null;
+
+    if (refreshToken && refreshToken.trim().length > 0) {
+      try {
+        const rotated = await this.refreshAuthorization(refreshToken);
+        console.log(
+          `[psn-keepalive] rotated refresh token; valid until ${new Date(rotated.refreshTokenExpiresAt).toISOString()}`
+        );
+        return { status: "rotated", refreshTokenExpiresAt: rotated.refreshTokenExpiresAt };
+      } catch (error) {
+        if (error instanceof PsnInvalidGrantError) {
+          const reloaded = await this.authStore.load();
+          if (
+            reloaded?.refreshToken &&
+            reloaded.refreshToken !== refreshToken &&
+            this.isAccessFresh(reloaded)
+          ) {
+            this.authState = reloaded;
+            console.log("[psn-keepalive] token already rotated by another instance; nothing to do");
+            return { status: "already-fresh", refreshTokenExpiresAt: reloaded.refreshTokenExpiresAt };
+          }
+
+          console.error(`[psn-keepalive] refresh token dead; bootstrapping from NPSSO: ${error.message}`);
+          const bootstrapped = await this.createAuthorizationFromNpsso();
+          return { status: "bootstrapped", refreshTokenExpiresAt: bootstrapped.refreshTokenExpiresAt };
+        }
+
+        console.error(`[psn-keepalive] transient failure; keeping existing token: ${(error as Error).message}`);
+        return {
+          status: "transient-skip",
+          refreshTokenExpiresAt: persistedAuthState?.refreshTokenExpiresAt ?? null
+        };
       }
     }
 
-    const tokens = await this.createAuthorizationFromNpsso();
-    return { accessToken: tokens.accessToken };
+    console.log("[psn-keepalive] no refresh token; bootstrapping from NPSSO");
+    const bootstrapped = await this.createAuthorizationFromNpsso();
+    return { status: "bootstrapped", refreshTokenExpiresAt: bootstrapped.refreshTokenExpiresAt };
   }
 
   private async refreshAuthorization(refreshToken: string): Promise<AuthState> {
-    const refreshed = await psnApi.exchangeRefreshTokenForAuthTokens(refreshToken);
-    const authState = {
-      accessToken: refreshed.accessToken,
-      refreshToken: refreshed.refreshToken,
-      expiresAt: Date.now() + refreshed.expiresIn * 1000
-    };
+    const body = new URLSearchParams({
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+      token_format: "jwt",
+      scope: "psn:mobile.v2.core psn:clientapp"
+    });
 
+    const authState = await this.requestAuthTokensWithRetry(body);
     await this.saveAuthState(authState);
     return authState;
   }
 
   private async createAuthorizationFromNpsso(): Promise<AuthState> {
-    const accessCode = await psnApi.exchangeNpssoForAccessCode(this.npsso);
-    const tokens = await psnApi.exchangeAccessCodeForAuthTokens(accessCode);
-    const authState = {
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      expiresAt: Date.now() + tokens.expiresIn * 1000
-    };
+    let accessCode: string;
 
+    try {
+      accessCode = await psnApi.exchangeNpssoForAccessCode(this.npsso);
+    } catch (error) {
+      throw new PsnNpssoInvalidError(
+        (error instanceof Error ? error.message : String(error)).trim() || "NPSSO is invalid or expired"
+      );
+    }
+
+    const body = new URLSearchParams({
+      code: accessCode,
+      redirect_uri: PSN_REDIRECT_URI,
+      grant_type: "authorization_code",
+      token_format: "jwt"
+    });
+
+    const authState = await this.requestAuthTokensWithRetry(body);
     await this.saveAuthState(authState);
     return authState;
   }
 
-  private async saveAuthState(authState: PersistedPsnAuthState): Promise<void> {
+  private async requestAuthTokensWithRetry(body: URLSearchParams): Promise<AuthState> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= TOKEN_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await requestAuthTokens(body);
+      } catch (error) {
+        lastError = error;
+
+        // Permanent failures must not be retried: a dead token / invalid NPSSO will
+        // never recover by trying again.
+        if (error instanceof PsnInvalidGrantError || error instanceof PsnNpssoInvalidError) {
+          throw error;
+        }
+
+        if (attempt < TOKEN_REQUEST_MAX_ATTEMPTS) {
+          const delayMs = TOKEN_REQUEST_BASE_DELAY_MS * 2 ** (attempt - 1);
+          console.warn(
+            `[psn-auth] transient token request failure (attempt ${attempt}/${TOKEN_REQUEST_MAX_ATTEMPTS}): ${(error as Error).message}; retrying in ${delayMs}ms`
+          );
+          await sleep(delayMs);
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  private async saveAuthState(authState: AuthState): Promise<void> {
     await this.authStore.save(authState);
     this.authState = authState;
   }

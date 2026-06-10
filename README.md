@@ -228,12 +228,29 @@ node scripts/migrate-sqlite-to-supabase.mjs --sqlite=data/bot.sqlite --env-file=
 
 ## PSN auth и summary
 
-- Первый успешный PSN auth через `BUDKA_PSN_NPSSO` сохраняет access/refresh tokens в `psn_auth_state`.
+- Первый успешный PSN auth через `BUDKA_PSN_NPSSO` сохраняет access/refresh tokens в `psn_auth_state`. Дальше NPSSO нужен только как bootstrap/аварийный fallback — в штатном режиме бот живёт на ротации refresh token.
 - Access/refresh tokens шифруются через `BUDKA_PSN_AUTH_ENCRYPTION_KEY`; plaintext не хранится в базе.
 - Перед PSN-запросами бот использует in-memory auth cache, затем persisted auth state из Supabase.
-- Access token обновляется через refresh token за 5 минут до истечения.
-- Если PSN вернул auth-ошибку, бот один раз принудительно обновляет auth и повторяет исходный запрос.
-- `BUDKA_PSN_NPSSO` остаётся emergency fallback, если persisted refresh token отсутствует или невалиден.
+- Access token (~1 час) обновляется через refresh token за 5 минут до истечения. Каждая успешная ротация выдаёт новый refresh token и сбрасывает его ~60-дневный срок — так цепочка живёт бесконечно.
+- `refresh_token_expires_at` хранит срок жизни самого refresh token. Если до него осталось < 7 дней (или он неизвестен), бот ротирует refresh token проактивно, даже когда access token ещё свежий.
+- Запрос токена всегда проверяет HTTP-статус ответа PSN и различает ошибки: `invalid_grant` (refresh token мёртв → только тогда возможен NPSSO bootstrap) против transient (сеть/5xx/429/битый ответ → ретраи с backoff, NPSSO **не** трогается). Это и был root cause старого падения: vendored `psn-api` не проверял `res.ok`, любой сбой ротации молча уводил бота на NPSSO, а тот успевал протухнуть.
+- `PsnAuthStore.save` жёстко валидирует state перед записью — пустые/`NaN` токены никогда не перезапишут рабочий refresh token.
+- Конкурентные запросы внутри одного isolate схлопываются в один refresh (single-flight); гонку ротации (`invalid_grant` из-за того, что соседний isolate уже обновил токен) бот переживает, перечитав state, без обращения к NPSSO.
+- Если PSN вернул auth-ошибку на самом API-запросе, бот один раз принудительно обновляет auth и повторяет исходный запрос.
+
+### Keep-alive (бот живёт вечно даже без трафика)
+
+Refresh token живёт ~60 дней и продлевается только при ротации. Чтобы простаивающий чат не дал ему протухнуть, есть keep-alive: scheduled job дёргает Edge Function, а та ротирует refresh token.
+
+- Endpoint: любой запрос к функции с заголовком `x-budka-keepalive: <BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET>` запускает `ensureFreshAuthorization()` (ротация non-destructive: при transient-сбое старый токен остаётся на месте).
+- Расписание через Supabase Cron (pg_cron + pg_net): см. [`supabase/keepalive-cron.sql`](supabase/keepalive-cron.sql) — запусти один раз в SQL Editor (или собери job в Dashboard → Integrations → Cron). Рекомендуемая частота — ежедневно: огромный запас против 60-дневного окна.
+
+### Если бот всё-таки умер (NPSSO протух)
+
+1. Применить миграции к проду (новая колонка `refresh_token_expires_at`): `supabase db push` (или прогнать `supabase/migrations/20260611000000_add_refresh_token_expires_at.sql` в SQL Editor). **Сделать это до деплоя нового кода.**
+2. Получить свежий NPSSO: открыть https://ca.account.sony.com/api/v1/ssocookie (залогинившись в PSN) и скопировать `npsso`. Проверить локально: `npm run psn:token -- --env-file=supabase/functions/.env.local`.
+3. Обновить секрет `BUDKA_PSN_NPSSO` (GitHub secret + `supabase secrets set`) и задеплоить.
+4. Первый же запрос (или вызов keep-alive) сделает bootstrap из нового NPSSO и сохранит свежие access/refresh tokens — дальше цепочка ротации держит бота живым сама.
 - Summary получает профиль, shareable URL, trophy summary, регион, presence, последние игры и avatar URL.
 - Закрытые профили без публичных trophy-данных не привязываются.
 - Presence и recent games деградируют мягко: при ошибке presence становится `offline`, последние игры — пустым списком.

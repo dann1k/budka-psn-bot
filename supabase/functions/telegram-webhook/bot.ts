@@ -10,6 +10,7 @@ import {
 import { LinkRepository } from "./repository.ts";
 import type { PendingTelegramAction } from "./repository.ts";
 import {
+  PsnNpssoInvalidError,
   PsnPrivateProfileError,
   PsnService,
   type PsnPlayedGame,
@@ -186,6 +187,10 @@ function formatPsnError(error: unknown, onlineId?: string): string {
 
   if (error instanceof PsnPrivateProfileError) {
     return `Профиль ${onlineId ?? "этого пользователя"} закрыт, данные о трофеях недоступны.`;
+  }
+
+  if (error instanceof PsnNpssoInvalidError) {
+    return "PSN NPSSO истёк и refresh token недоступен. Обнови секрет BUDKA_PSN_NPSSO (новый код: https://ca.account.sony.com/api/v1/ssocookie) и передеплой бота.";
   }
 
   if (fallback.includes("User not found")) {
