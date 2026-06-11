@@ -212,6 +212,11 @@ const REFRESH_TOKEN_RENEW_MARGIN_MS = 7 * 24 * 60 * 60_000;
 const DEFAULT_REFRESH_TOKEN_TTL_MS = 55 * 24 * 60 * 60_000;
 const TOKEN_REQUEST_MAX_ATTEMPTS = 3;
 const TOKEN_REQUEST_BASE_DELAY_MS = 300;
+// Hard caps so a non-responding PSN endpoint can never hang a request handler
+// (which would stick the invocation for grammy's full timeout and back up the
+// Telegram webhook queue for everyone).
+const PSN_AUTH_REQUEST_TIMEOUT_MS = 12_000;
+const PSN_OPERATION_TIMEOUT_MS = 15_000;
 
 const PSN_AUTH_TOKEN_URL = "https://ca.account.sony.com/api/authz/v3/oauth/token";
 const PSN_REDIRECT_URI = "com.scee.psxandroid.scecompcall://redirect";
@@ -244,8 +249,35 @@ export class PsnNpssoInvalidError extends Error {
   }
 }
 
+/** Raised when a PSN call exceeds its time budget. */
+export class PsnTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PsnTimeoutError";
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new PsnTimeoutError(`PSN ${label} timed out after ${ms}ms`));
+    }, ms);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 type RawTokenResponse = {
@@ -276,6 +308,8 @@ function isInvalidGrantReason(reason: string): boolean {
  */
 async function requestAuthTokens(body: URLSearchParams): Promise<AuthState> {
   let response: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PSN_AUTH_REQUEST_TIMEOUT_MS);
 
   try {
     response = await fetch(PSN_AUTH_TOKEN_URL, {
@@ -284,12 +318,19 @@ async function requestAuthTokens(body: URLSearchParams): Promise<AuthState> {
         "Content-Type": "application/x-www-form-urlencoded",
         Authorization: PSN_CLIENT_AUTHORIZATION
       },
-      body: body.toString()
+      body: body.toString(),
+      signal: controller.signal
     });
   } catch (error) {
-    throw new PsnTransientAuthError(
-      `PSN token request network failure: ${error instanceof Error ? error.message : String(error)}`
-    );
+    const reason =
+      error instanceof DOMException && error.name === "AbortError"
+        ? `timed out after ${PSN_AUTH_REQUEST_TIMEOUT_MS}ms`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    throw new PsnTransientAuthError(`PSN token request network failure: ${reason}`);
+  } finally {
+    clearTimeout(timeout);
   }
 
   const rawText = await response.text();
@@ -671,7 +712,7 @@ export class PsnService {
     const auth = await this.getAuthorization();
 
     try {
-      return await operation(auth.accessToken);
+      return await withTimeout(operation(auth.accessToken), PSN_OPERATION_TIMEOUT_MS, "operation");
     } catch (error) {
       if (!isPsnAuthError(error)) {
         throw error;
@@ -679,7 +720,7 @@ export class PsnService {
 
       this.authState = null;
       const refreshedAuth = await this.getAuthorization({ forceRefresh: true });
-      return await operation(refreshedAuth.accessToken);
+      return await withTimeout(operation(refreshedAuth.accessToken), PSN_OPERATION_TIMEOUT_MS, "operation retry");
     }
   }
 

@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError, InlineKeyboard, InputFile } from "npm:grammy@1.41.1/web";
+import { Bot, type Context, GrammyError, HttpError, InlineKeyboard, InputFile } from "npm:grammy@1.41.1/web";
 import type { MessageEntity } from "npm:grammy@1.41.1/types";
 import {
   formatLeaderboardRow,
@@ -198,6 +198,18 @@ function formatPsnError(error: unknown, onlineId?: string): string {
   }
 
   return fallback;
+}
+
+async function safeAnswerCallbackQuery(ctx: Context, text?: string): Promise<void> {
+  try {
+    await ctx.answerCallbackQuery(text ? { text } : undefined);
+  } catch (error) {
+    // A late-processed update makes the callback query "too old"; that must not
+    // crash the handler (otherwise the loading message is never cleaned up).
+    console.warn(
+      `[menu] answerCallbackQuery skipped: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function formatTelegramLabel(user: Pick<LinkedUser, "username" | "displayName">): string {
@@ -1499,29 +1511,23 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const callbackReceivedAt = Date.now();
     const callback = parseMenuCallbackData(ctx.callbackQuery.data);
     if (!callback) {
-      await ctx.answerCallbackQuery({
-        text: "Неизвестное действие меню."
-      });
+      await safeAnswerCallbackQuery(ctx, "Неизвестное действие меню.");
       return;
     }
 
     const actor = getActor(ctx);
     if (!actor) {
-      await ctx.answerCallbackQuery({
-        text: "Не удалось определить отправителя."
-      });
+      await safeAnswerCallbackQuery(ctx, "Не удалось определить отправителя.");
       return;
     }
 
     if (actor.id !== callback.ownerId) {
-      await ctx.answerCallbackQuery({
-        text: "Это меню другого участника. Отправь /menu"
-      });
+      await safeAnswerCallbackQuery(ctx, "Это меню другого участника. Отправь /menu");
       return;
     }
 
     const answerStartedAt = Date.now();
-    await ctx.answerCallbackQuery();
+    await safeAnswerCallbackQuery(ctx);
     console.log(
       `[menu] action=${callback.action} answerCallbackQuery ms=${Date.now() - answerStartedAt} sinceCallback=${Date.now() - callbackReceivedAt}`,
     );

@@ -12,7 +12,9 @@ const psnService = new PsnService(config.psnNpsso, psnAuthStore);
 const bot = createBot(config, repository, psnService);
 const handleTelegramWebhook = webhookCallback(bot, "std/http", {
   secretToken: config.telegramWebhookSecret,
-  timeoutMilliseconds: 55_000
+  // Keep below PSN per-operation timeouts so a stuck handler frees the Telegram
+  // webhook connection quickly instead of jamming the update queue for everyone.
+  timeoutMilliseconds: 30_000
 });
 
 // Header carrying the keep-alive secret. A scheduled job (Supabase pg_cron + pg_net)
