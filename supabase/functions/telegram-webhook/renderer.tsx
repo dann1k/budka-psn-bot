@@ -28,20 +28,32 @@ export function h(type: any, props: any, ...children: any[]) {
 
 export const Fragment = (props: any) => props.children;
 
-// Logical layout width used by Satori for all cards. Resvg rasterizes the
-// SVG at CARD_LOGICAL_WIDTH * scale px wide. Scale is per-card because
-// Supabase Edge Functions on the free plan cap CPU time at ~2s per request.
-// Summary is a compact 800x550 card and survives a moderate upscale, so it
-// renders at SUMMARY_RENDER_SCALE for crisper text. Leaderboard and popular
-// can grow tall with chat size and must stay at 1.0x to fit the CPU budget;
-// otherwise the function gets killed mid-render and Telegram retries the
-// webhook (which produces duplicate "please wait" messages).
+// Logical layout width used by Satori for all cards. Resvg rasterizes the SVG at
+// `width * scale` px; rasterization CPU cost is ~proportional to the output pixel
+// count, and Supabase Edge Functions on the free plan cap CPU at ~2s per request.
+// Summary is a fixed 800x550 card and survives an upscale for crisper text.
+// Leaderboard and popular grow taller with chat size, so they DON'T use a fixed
+// scale: computeOutputWidth() caps the *total* output pixels to a budget (never
+// upscaling past 1.0x), so a big table auto-downscales instead of getting killed
+// mid-render (which made the worker shut down and Telegram retry the webhook).
 const CARD_LOGICAL_WIDTH = 800;
-const RENDER_SCALE = 1.2;
-const RENDER_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * RENDER_SCALE);
 const SUMMARY_RENDER_SCALE = 1.4;
 const SUMMARY_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * SUMMARY_RENDER_SCALE);
 const CARD_BACKGROUND = "#070b19";
+
+// Max output pixels (width * height) for growable cards. ~1.05M px (960x1100, the
+// old 1.2x leaderboard) blew the CPU budget and the worker was killed; ~0.7M px
+// rasterizes comfortably within the ~2s CPU limit. MIN_OUTPUT_WIDTH keeps very
+// large tables legible at the cost of slightly exceeding the budget.
+const RASTER_PIXEL_BUDGET = 700_000;
+const MIN_OUTPUT_WIDTH = 560;
+
+function computeOutputWidth(logicalWidth: number, logicalHeight: number, maxScale: number): number {
+  const widthByScale = Math.round(logicalWidth * maxScale);
+  const budgetScale = Math.sqrt(RASTER_PIXEL_BUDGET / (logicalWidth * logicalHeight));
+  const widthByBudget = Math.round(logicalWidth * budgetScale);
+  return Math.max(MIN_OUTPUT_WIDTH, Math.min(widthByScale, widthByBudget));
+}
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
 // given Satori-rendered Inter Bold 11px pills with 8px horizontal padding
@@ -878,7 +890,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: RENDER_OUTPUT_WIDTH,
+      value: computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1),
     },
   });
 
@@ -1104,7 +1116,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: RENDER_OUTPUT_WIDTH,
+      value: computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1),
     },
   });
 
