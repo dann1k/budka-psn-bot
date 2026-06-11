@@ -19,6 +19,7 @@ import {
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
 import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
+import { texts } from "./texts.ts";
 
 type BotConfig = {
   botToken: string;
@@ -101,13 +102,6 @@ type MenuAction =
   | "unlink"
   | "close";
 
-const PENDING_ACTION_LABELS: Record<PendingTelegramAction, string> = {
-  link: "Привязать PSN",
-  summary_psn: "Summary по игроку или PSN ID",
-  default: "Выбрать default",
-  unlink: "Отвязать PSN"
-};
-
 function ensureGroup(chatType: string): boolean {
   return chatType === "group" || chatType === "supergroup";
 }
@@ -124,7 +118,7 @@ function isSupportedChat(chatType: string): boolean {
 
 function formatChatTitle(chat: KnownChat): string {
   const title = chat.title?.trim();
-  return title && title.length > 0 ? title : `Чат ${chat.chatId}`;
+  return title && title.length > 0 ? title : texts.chat.titleFallback(chat.chatId);
 }
 
 function getDisplayName(user: { first_name: string; last_name?: string }): string {
@@ -221,18 +215,18 @@ function buildActorMention(actor: TelegramActor): { text: string; entities: Mess
 }
 
 function formatPsnError(error: unknown, onlineId?: string): string {
-  const fallback = error instanceof Error ? error.message : "Неизвестная ошибка.";
+  const fallback = error instanceof Error ? error.message : texts.psnError.unknown;
 
   if (error instanceof PsnPrivateProfileError) {
-    return `Профиль ${onlineId ?? "этого пользователя"} закрыт, данные о трофеях недоступны.`;
+    return texts.psnError.privateProfile(onlineId ?? texts.psnError.someoneFallback);
   }
 
   if (error instanceof PsnNpssoInvalidError) {
-    return "PSN NPSSO истёк и refresh token недоступен. Обнови секрет BUDKA_PSN_NPSSO (новый код: https://ca.account.sony.com/api/v1/ssocookie) и передеплой бота.";
+    return texts.psnError.npssoExpired;
   }
 
   if (fallback.includes("User not found")) {
-    return `Пользователь ${onlineId ?? "с таким ID"} не найден.`;
+    return texts.psnError.userNotFound(onlineId ?? texts.psnError.unknownIdFallback);
   }
 
   return fallback;
@@ -305,12 +299,14 @@ async function replySummary(
   },
   text: string,
   entities: MessageEntity[],
-  avatarUrl?: string | null
+  avatarUrl?: string | null,
+  replyMarkup?: typeof INPUT_HINT_RESET
 ): Promise<void> {
   if (avatarUrl && ctx.replyWithPhoto) {
     await ctx.replyWithPhoto(avatarUrl, {
       caption: text,
       caption_entities: entities,
+      reply_markup: replyMarkup,
       reply_parameters: ctx.msg
         ? {
             message_id: ctx.msg.message_id
@@ -320,53 +316,46 @@ async function replySummary(
     return;
   }
 
-  await replyToCommand(ctx, text, { entities });
+  await replyToCommand(ctx, text, { entities, reply_markup: replyMarkup });
 }
 
-// Telegram pins a ForceReply's input_field_placeholder in the client's per-chat
-// input state and gives the bot no "reply answered" signal, so the grey hint can
-// stick (get cached) even after the prompt is consumed/cancelled/expired. The only
-// way to drop it is to overwrite that state with a fresh reply markup: we send a
-// blank carrier message carrying ReplyKeyboardRemove — scoped to the one user via
-// selective + a reply to their own message — then delete the carrier (the client
-// has already collapsed the input state by then). `aggressive` first re-renders the
-// input with a placeholder-less force_reply for sticky clients (TelegramSwift#1103),
-// then always ends on remove_keyboard so the input returns to a normal state.
-// Refs: grammyjs/stateless-question; tdlib/telegram-bot-api#471.
-async function clearForcedReplyPlaceholder(
+// Серая подсказка ("Введите ник…") — это input_field_placeholder от ForceReply.
+// Telegram-клиент кеширует её в состоянии поля ввода чата. На Telegram для macOS
+// (TelegramSwift) она НЕ сбрасывается, когда пользователь отвечает, и залипает.
+// Единственное надёжное лекарство — доставить ReplyKeyboardRemove сообщением,
+// которое ОСТАЁТСЯ в чате: если сообщение-носитель удалить, macOS откатывает
+// состояние ввода к предыдущему reply markup, т.е. обратно к залипшей подсказке —
+// именно поэтому прежний вариант с «отправить и удалить» был бесполезен на маке.
+// Поэтому мы вешаем remove_keyboard на сообщения, которые и так остаются (сводку,
+// ответ на /cancel, уведомление об истечении), а где такого нет — шлём отдельное
+// постоянное. Адресуем одному пользователю через selective + reply_parameters.
+// Проверенный рецепт: dann1k/helper_chat_bot@6540f39. На iOS подсказка и так
+// очищается при ответе.
+const INPUT_HINT_RESET = { remove_keyboard: true, selective: true } as const;
+
+async function resetInputHint(
   ctx: Context,
   targetMessageId: number | undefined,
-  options: { aggressive?: boolean } = {}
+  text: string
 ): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId === undefined) {
     return;
   }
 
-  const replyParameters = targetMessageId !== undefined
-    ? { message_id: targetMessageId, allow_sending_without_reply: true }
-    : undefined;
-
-  const sendReset = async (
-    replyMarkup: { remove_keyboard: true; selective: true } | { force_reply: true; selective: true }
-  ): Promise<void> => {
-    try {
-      const carrier = await ctx.api.sendMessage(chatId, "⠀", {
-        reply_parameters: replyParameters,
-        reply_markup: replyMarkup
-      });
-      await ctx.api.deleteMessage(chatId, carrier.message_id).catch(() => {});
-    } catch (error) {
-      console.warn(
-        `[placeholder] reset failed: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  };
-
-  if (options.aggressive) {
-    await sendReset({ force_reply: true, selective: true });
+  try {
+    // ВАЖНО: это сообщение НЕЛЬЗЯ удалять (см. комментарий выше про откат на macOS).
+    await ctx.api.sendMessage(chatId, text, {
+      reply_parameters: targetMessageId !== undefined
+        ? { message_id: targetMessageId, allow_sending_without_reply: true }
+        : undefined,
+      reply_markup: INPUT_HINT_RESET
+    });
+  } catch (error) {
+    console.warn(
+      `[hint] reset failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
-  await sendReset({ remove_keyboard: true, selective: true });
 }
 
 function isTelegramHandle(value: string | null): boolean {
@@ -424,7 +413,7 @@ function formatParticipantList(labels: string[], limit = 6): string {
     return labels.join(", ");
   }
 
-  return `${labels.slice(0, limit).join(", ")} и ещё ${labels.length - limit}`;
+  return `${labels.slice(0, limit).join(", ")} ${texts.common.andMore(labels.length - limit)}`;
 }
 
 function getPopularDebugAccountKey(account: Pick<PopularDebugAccount, "psnOnlineId" | "accountId">): string {
@@ -450,18 +439,14 @@ function formatPopularDebugAccountList(accounts: PopularDebugAccount[], limit = 
     return formatted;
   }
 
-  return `${formatted}; и ещё ${accounts.length - limit}`;
+  return `${formatted}; ${texts.common.andMore(accounts.length - limit)}`;
 }
 
 function formatPopularGameRow(game: PopularGameAccumulator, index: number): { text: string; entities: MessageEntity[] } {
   const players = [...game.players.values()]
     .sort((a, b) => a.localeCompare(b, "ru-RU"));
   const title = `${index + 1}. ${game.name}`;
-  const details = `${game.players.size} ${pluralizeRu(game.players.size, [
-    "участник",
-    "участника",
-    "участников"
-  ])}: ${formatParticipantList(players)}`;
+  const details = `${game.players.size} ${pluralizeRu(game.players.size, texts.popular.participants)}: ${formatParticipantList(players)}`;
   const text = `${title}\n${details}`;
 
   return {
@@ -528,22 +513,22 @@ function parseMenuCallbackData(value: string | undefined): { ownerId: number; ac
 
 function buildActionMenu(ownerId: number): InlineKeyboard {
   return new InlineKeyboard()
-    .text("Моя сводка", buildMenuCallbackData(ownerId, "summary"))
-    .text("Мои аккаунты", buildMenuCallbackData(ownerId, "me"))
+    .text(texts.menu.summary, buildMenuCallbackData(ownerId, "summary"))
+    .text(texts.menu.me, buildMenuCallbackData(ownerId, "me"))
     .row()
-    .text("Таблица", buildMenuCallbackData(ownerId, "table"))
-    .text("Популярные", buildMenuCallbackData(ownerId, "popular"))
+    .text(texts.menu.table, buildMenuCallbackData(ownerId, "table"))
+    .text(texts.menu.popular, buildMenuCallbackData(ownerId, "popular"))
     .row()
-    .text("Платины", buildMenuCallbackData(ownerId, "plats"))
-    .text("Регионы", buildMenuCallbackData(ownerId, "region"))
+    .text(texts.menu.plats, buildMenuCallbackData(ownerId, "plats"))
+    .text(texts.menu.region, buildMenuCallbackData(ownerId, "region"))
     .row()
-    .text("Выбрать default", buildMenuCallbackData(ownerId, "default"))
-    .text("Summary по игроку", buildMenuCallbackData(ownerId, "summary_psn"))
+    .text(texts.menu.default, buildMenuCallbackData(ownerId, "default"))
+    .text(texts.menu.summaryPsn, buildMenuCallbackData(ownerId, "summary_psn"))
     .row()
-    .text("Привязать PSN", buildMenuCallbackData(ownerId, "link"))
-    .text("Отвязать PSN", buildMenuCallbackData(ownerId, "unlink"))
+    .text(texts.menu.link, buildMenuCallbackData(ownerId, "link"))
+    .text(texts.menu.unlink, buildMenuCallbackData(ownerId, "unlink"))
     .row()
-    .text("Закрыть", buildMenuCallbackData(ownerId, "close"));
+    .text(texts.menu.close, buildMenuCallbackData(ownerId, "close"));
 }
 
 function getErrorStatus(error: unknown): number | null {
@@ -578,19 +563,19 @@ function formatPopularSkipReason(error: unknown): string {
   const normalizedMessage = message.toLowerCase();
 
   if (status === 401 || normalizedMessage.includes("unauthorized") || normalizedMessage.includes("access token")) {
-    return "ошибка авторизации PSN";
+    return texts.skipReason.auth;
   }
 
   if (status === 403 || normalizedMessage.includes("forbidden") || normalizedMessage.includes("privacy")) {
-    return "нет доступа или закрытая активность";
+    return texts.skipReason.forbidden;
   }
 
   if (status === 404 || normalizedMessage.includes("user not found") || normalizedMessage.includes("not found")) {
-    return "профиль или список игр не найден";
+    return texts.skipReason.notFound;
   }
 
   if (status && status >= 500) {
-    return "временная ошибка PSN";
+    return texts.skipReason.temporary;
   }
 
   if (
@@ -598,10 +583,10 @@ function formatPopularSkipReason(error: unknown): string {
     normalizedMessage.includes("timeout") ||
     normalizedMessage.includes("fetch")
   ) {
-    return "ошибка сети";
+    return texts.skipReason.network;
   }
 
-  return message ? message.slice(0, 120) : "неизвестная ошибка";
+  return message ? message.slice(0, 120) : texts.skipReason.unknown;
 }
 
 export function createBot(config: BotConfig, repository: LinkRepository, psnService: PsnService): Bot {
@@ -684,7 +669,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (chats.length === 0) {
       await replyToCommand(
         ctx,
-        "Я пока не вижу ни одного общего с тобой чата. Добавь меня в нужный чат (или напиши там что-нибудь), потом возвращайся в личку."
+        texts.common.noSharedChats
       );
       return null;
     }
@@ -698,7 +683,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       ctx,
       actor.id,
       chats,
-      "Выбери чат, данные которого показывать в личке:"
+      texts.chat.selectHeader
     );
     return null;
   }
@@ -712,13 +697,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     if (!isPrivateChat(ctx.chat.type)) {
-      await replyToCommand(ctx, "Бот работает в группах и в личке.");
+      await replyToCommand(ctx, texts.common.unsupportedChat);
       return null;
     }
 
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return null;
     }
 
@@ -810,7 +795,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   async function requireActor(ctx: TelegramActionContext): Promise<TelegramActor | null> {
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return null;
     }
 
@@ -830,7 +815,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await replyToCommand(ctx, "Меню:", {
+    await replyToCommand(ctx, texts.menu.header, {
       reply_markup: buildActionMenu(actor.id)
     });
   }
@@ -847,25 +832,21 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       // ("Введите ник @Telegram или ник PSN") via ForceReply. The next text they
       // send is picked up by the pending-action flow and routed to handleSummary.
       const mention = buildActorMention(actor);
-      await replyToCommand(ctx, `${mention.text}, чья сводка?`, {
+      await replyToCommand(ctx, texts.pending.summaryWho(mention.text), {
         entities: mention.entities,
         reply_markup: {
           force_reply: true,
           selective: true,
-          input_field_placeholder: "Введите ник @Telegram или ник PSN"
+          input_field_placeholder: texts.pending.summaryPlaceholder
         }
       });
       return;
     }
 
-    const hints: Record<PendingTelegramAction, string> = {
-      link: "Пришли PSN Online ID, который нужно привязать.",
-      summary_psn: "Пришли @telegram участника чата или PSN Online ID. Для своей сводки можно просто нажать «Моя сводка».",
-      default: "Пришли PSN Online ID из твоих привязок, который сделать default.",
-      unlink: "Пришли PSN Online ID для удаления или /cancel, если передумал."
-    };
-
-    await replyToCommand(ctx, `${PENDING_ACTION_LABELS[action]}\n${hints[action]}\n\nОтмена: /cancel`);
+    await replyToCommand(
+      ctx,
+      `${texts.pending.labels[action]}\n${texts.pending.hints[action]}\n\n${texts.pending.footer}`
+    );
   }
 
   async function handleLink(ctx: TelegramActionContext, chatId: number, actor: TelegramActor, onlineId: string): Promise<void> {
@@ -873,13 +854,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (existingOwner && existingOwner.userId !== actor.id) {
       await replyToCommand(
         ctx,
-        `Профиль ${existingOwner.psnOnlineId} уже привязан в этой группе к ${formatTelegramLabel(existingOwner)}.`
+        texts.link.alreadyLinkedHere(existingOwner.psnOnlineId, formatTelegramLabel(existingOwner))
       );
       return;
     }
 
     if (existingOwner && existingOwner.userId === actor.id) {
-      await replyToCommand(ctx, `Профиль ${existingOwner.psnOnlineId} уже привязан к тебе.`);
+      await replyToCommand(ctx, texts.link.alreadyLinkedYou(existingOwner.psnOnlineId));
       return;
     }
 
@@ -890,13 +871,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       if (canonicalOwner && canonicalOwner.userId !== actor.id) {
         await replyToCommand(
           ctx,
-          `Профиль ${canonicalOwner.psnOnlineId} уже привязан в этой группе к ${formatTelegramLabel(canonicalOwner)}.`
+          texts.link.alreadyLinkedHere(canonicalOwner.psnOnlineId, formatTelegramLabel(canonicalOwner))
         );
         return;
       }
 
       if (canonicalOwner && canonicalOwner.userId === actor.id) {
-        await replyToCommand(ctx, `Профиль ${canonicalOwner.psnOnlineId} уже привязан к тебе.`);
+        await replyToCommand(ctx, texts.link.alreadyLinkedYou(canonicalOwner.psnOnlineId));
         return;
       }
 
@@ -926,7 +907,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         },
         config.emojis
       );
-      const prefix = `Добавил аккаунт ${summary.onlineId}.\n\n`;
+      const prefix = texts.link.added(summary.onlineId);
 
       await replyToCommand(ctx, `${prefix}${summaryMessage.text}`, {
         entities: summaryMessage.entities.map((entity) => ({
@@ -936,14 +917,14 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       });
     } catch (error) {
       const message = formatPsnError(error, onlineId);
-      await replyToCommand(ctx, `Не получилось привязать профиль: ${message}`);
+      await replyToCommand(ctx, texts.link.failed(message));
     }
   }
 
   async function handleMe(ctx: TelegramActionContext, chatId: number, actor: TelegramActor): Promise<void> {
     const accounts = await repository.listAccountsByUser(chatId, actor.id);
     if (accounts.length === 0) {
-      await replyToCommand(ctx, "У тебя пока нет привязок. Используй /link <online-id> или /menu.");
+      await replyToCommand(ctx, texts.me.none);
       return;
     }
 
@@ -956,12 +937,16 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     await replyToCommand(
       ctx,
-      `Твои аккаунты: ${accounts.map((account) => account.psnOnlineId).join(", ")}`
+      texts.me.accounts(accounts.map((account) => account.psnOnlineId).join(", "))
     );
   }
 
-  async function handleSummary(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
+  async function handleSummary(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null, clearInputHint = false): Promise<void> {
     const responseMode = await repository.getResponseMode(chatId);
+    // На пути «ответ на ForceReply» вешаем remove_keyboard на ответ бота, чтобы
+    // сбросить залипшую серую подсказку (см. resetInputHint). Сводка — сообщение,
+    // которое остаётся в чате, поэтому годится как носитель без лишнего шума.
+    const hintReset = clearInputHint ? INPUT_HINT_RESET : undefined;
 
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
@@ -986,12 +971,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             },
             config.emojis
           );
-          const prefix = "Данные напрямую из PSN\n\n";
+          const prefix = texts.summary.directPsnPrefix;
           await replySummary(
             ctx,
             `${prefix}${summaryMessage.text}`,
             shiftEntities(summaryMessage.entities, prefix),
-            summary.avatarUrl
+            summary.avatarUrl,
+            hintReset
           );
           return;
         }
@@ -1001,7 +987,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             userId: 0,
             chatId,
             username: null,
-            displayName: "Данные из PSN",
+            displayName: texts.summary.directPsnDisplayName,
             defaultPsnOnlineId: null
           },
           accountLinks: [],
@@ -1014,20 +1000,16 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
         const cardPng = await renderGamerCard(mockPlayer, summary);
         if (ctx.replyWithPhoto) {
-          await ctx.replyWithPhoto(new InputFile(cardPng, `${summary.onlineId}_card.png`), ctx.msg
-            ? {
-                reply_parameters: {
-                  message_id: ctx.msg.message_id
-                }
-              }
-            : undefined
-          );
+          await ctx.replyWithPhoto(new InputFile(cardPng, `${summary.onlineId}_card.png`), {
+            reply_markup: hintReset,
+            reply_parameters: ctx.msg ? { message_id: ctx.msg.message_id } : undefined
+          });
         } else {
-          await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+          await replyToCommand(ctx, texts.common.photoUnavailable, { reply_markup: hintReset });
         }
       } catch (error) {
         const message = formatPsnError(error, targetArg);
-        await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
+        await replyToCommand(ctx, texts.summary.failed(message), { reply_markup: hintReset });
       }
       return;
     }
@@ -1038,8 +1020,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         targetArg
-          ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
+          ? texts.common.playerNotFound(targetArg)
+          : texts.common.noLinks,
+        { reply_markup: hintReset }
       );
       return;
     }
@@ -1064,7 +1047,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           ctx,
           `${prefix}${summaryMessage.text}`,
           shiftEntities(summaryMessage.entities, prefix),
-          preferred.summary.avatarUrl
+          preferred.summary.avatarUrl,
+          hintReset
         );
         return;
       }
@@ -1072,20 +1056,16 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const cardPng = await renderGamerCard(aggregated, preferred.summary);
 
       if (ctx.replyWithPhoto) {
-        await ctx.replyWithPhoto(new InputFile(cardPng, `${preferred.summary.onlineId}_card.png`), ctx.msg
-          ? {
-              reply_parameters: {
-                message_id: ctx.msg.message_id
-              }
-            }
-          : undefined
-        );
+        await ctx.replyWithPhoto(new InputFile(cardPng, `${preferred.summary.onlineId}_card.png`), {
+          reply_markup: hintReset,
+          reply_parameters: ctx.msg ? { message_id: ctx.msg.message_id } : undefined
+        });
       } else {
-        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+        await replyToCommand(ctx, texts.common.photoUnavailable, { reply_markup: hintReset });
       }
     } catch (error) {
       const message = formatPsnError(error);
-      await replyToCommand(ctx, `Не получилось получить сводку: ${message}`);
+      await replyToCommand(ctx, texts.summary.failed(message), { reply_markup: hintReset });
     }
   }
 
@@ -1094,12 +1074,12 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const match = accounts.find((account) => account.psnOnlineId.toLowerCase() === onlineId.toLowerCase());
 
     if (!match) {
-      await replyToCommand(ctx, `У тебя нет привязки к ${onlineId}.`);
+      await replyToCommand(ctx, texts.common.notLinkedTo(onlineId));
       return;
     }
 
     await repository.setDefaultAccount(chatId, actor.id, match.psnOnlineId);
-    await replyToCommand(ctx, `Приоритетный аккаунт для summary: ${match.psnOnlineId}`);
+    await replyToCommand(ctx, texts.default.set(match.psnOnlineId));
   }
 
   async function handleRegion(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
@@ -1109,8 +1089,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         targetArg
-          ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
+          ? texts.common.playerNotFound(targetArg)
+          : texts.common.noLinks
       );
       return;
     }
@@ -1121,10 +1101,10 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         .map((account) => `${account.onlineId} ${getFlagEmoji(account.regionCode)}`)
         .join(", ");
 
-      await replyToCommand(ctx, `${formatTelegramLabel(targetUser)}: ${regionText}`);
+      await replyToCommand(ctx, texts.region.line(formatTelegramLabel(targetUser), regionText));
     } catch (error) {
       const message = formatPsnError(error);
-      await replyToCommand(ctx, `Не получилось получить регион: ${message}`);
+      await replyToCommand(ctx, texts.region.failed(message));
     }
   }
 
@@ -1135,8 +1115,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         targetArg
-          ? `Не нашёл игрока ${targetArg} среди привязанных пользователей.`
-          : "Сначала привяжи хотя бы один профиль через /link <online-id> или /menu."
+          ? texts.common.playerNotFound(targetArg)
+          : texts.common.noLinks
       );
       return;
     }
@@ -1149,7 +1129,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const titles = perAccountTitles.flat();
 
       if (titles.length === 0) {
-        await replyToCommand(ctx, `У игрока ${formatTelegramLabel(targetUser)} пока нет платин.`);
+        await replyToCommand(ctx, texts.plats.none(formatTelegramLabel(targetUser)));
         return;
       }
 
@@ -1200,11 +1180,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
       const messages = chunkRichMessages([
         {
-          text: `Платины ${formatTelegramLabel(targetUser)} (${sortedGroups.length}):\n`,
+          text: `${texts.plats.headerPrefix}${formatTelegramLabel(targetUser)}${texts.plats.headerCount(sortedGroups.length)}`,
           entities: [
             {
               type: "bold",
-              offset: utf16Length("Платины "),
+              offset: utf16Length(texts.plats.headerPrefix),
               length: utf16Length(formatTelegramLabel(targetUser))
             }
           ]
@@ -1245,7 +1225,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       }
     } catch (error) {
       const message = formatPsnError(error);
-      await replyToCommand(ctx, `Не получилось получить платины: ${message}`);
+      await replyToCommand(ctx, texts.plats.failed(message));
     }
   }
 
@@ -1256,8 +1236,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         onlineId
-          ? `У тебя нет привязки к ${onlineId}.`
-          : "Для тебя в этом чате не было сохранённых привязок."
+          ? texts.common.notLinkedTo(onlineId)
+          : texts.unlink.nothingSaved
       );
       return;
     }
@@ -1265,8 +1245,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     await replyToCommand(
       ctx,
       onlineId
-        ? `Удалил привязку ${onlineId}.`
-        : `Удалил все твои привязки (${deleted}).`
+        ? texts.unlink.removedOne(onlineId)
+        : texts.unlink.removedAll(deleted)
     );
   }
 
@@ -1276,7 +1256,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const normalizedDebugSearch = normalizeSearchText(debugSearch);
     const users = await repository.listUsers(chatId);
     if (users.length === 0) {
-      await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
+      await replyToCommand(ctx, texts.common.noProfilesInGroup);
       return;
     }
 
@@ -1294,7 +1274,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     );
 
     if (accountJobs.length === 0) {
-      await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
+      await replyToCommand(ctx, texts.common.noProfilesInGroup);
       return;
     }
 
@@ -1403,8 +1383,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       await replyToCommand(
         ctx,
         skippedAccounts.length > 0
-          ? "Не получилось собрать популярные игры: доступных данных нет."
-          : "Не нашёл сыгранных игр у привязанных участников."
+          ? texts.popular.noData
+          : texts.popular.noGames
       );
       return;
     }
@@ -1471,20 +1451,20 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return;
       } catch (error) {
         console.error("[popular] render or upload failed:", error);
-        const message = error instanceof Error ? error.message : "Не удалось отрендерить карточку.";
-        await replyToCommand(ctx, `Не получилось собрать популярные игры: ${message}`);
+        const message = error instanceof Error ? error.message : texts.popular.renderFallback;
+        await replyToCommand(ctx, texts.popular.failed(message));
         return;
       }
     }
 
     const messages = chunkRichMessages([
-      { text: "Популярные игры чата", entities: [] },
+      { text: texts.popular.header, entities: [] },
       ...topGames.map((game, index) => formatPopularGameRow(game, index)),
       ...(isDebug && debugSearch
         ? [
-            { text: `Debug по игре: ${debugSearch}`, entities: [] },
+            { text: texts.popular.debug.byGame(debugSearch), entities: [] },
             {
-              text: `Проверено аккаунтов: ${loadedAccounts.length}, с совпадениями: ${debugMatchedAccountKeys.size}`,
+              text: texts.popular.debug.stats(loadedAccounts.length, debugMatchedAccountKeys.size),
               entities: []
             },
             ...(matchingDebugGames.length > 0
@@ -1499,28 +1479,29 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
                         "ru-RU"
                       ));
                     const text = [
-                      `- ${game.name} — ${game.players.size} ${pluralizeRu(game.players.size, [
-                        "участник",
-                        "участника",
-                        "участников"
-                      ])}: ${formatParticipantList(players)}`,
-                      `  аккаунты: ${formatPopularDebugAccountList(accounts)}`
+                      texts.popular.debug.gameRow(
+                        game.name,
+                        game.players.size,
+                        pluralizeRu(game.players.size, texts.popular.participants),
+                        formatParticipantList(players)
+                      ),
+                      texts.popular.debug.accountsRow(formatPopularDebugAccountList(accounts))
                     ].join("\n");
 
                     return { text, entities: [] };
                   })
-              : [{ text: "Совпадений не найдено.", entities: [] }]),
+              : [{ text: texts.popular.debug.noMatches, entities: [] }]),
             ...(matchingDebugGames.length > 20
-              ? [{ text: `...и ещё ${matchingDebugGames.length - 20}`, entities: [] }]
+              ? [{ text: texts.popular.debug.more(matchingDebugGames.length - 20), entities: [] }]
               : []),
             ...(debugAccountsWithoutMatch.length > 0
               ? [
-                  { text: "Проверенные аккаунты без совпадений:", entities: [] },
+                  { text: texts.popular.debug.accountsWithoutMatch, entities: [] },
                   ...debugAccountsWithoutMatch
                     .slice(0, 10)
-                    .map((account) => ({ text: `- ${formatPopularDebugAccount(account)}`, entities: [] })),
+                    .map((account) => ({ text: texts.popular.debug.accountRow(formatPopularDebugAccount(account)), entities: [] })),
                   ...(debugAccountsWithoutMatch.length > 10
-                    ? [{ text: `...и ещё ${debugAccountsWithoutMatch.length - 10}`, entities: [] }]
+                    ? [{ text: texts.popular.debug.more(debugAccountsWithoutMatch.length - 10), entities: [] }]
                     : [])
                 ]
               : [])
@@ -1548,7 +1529,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   async function handleTable(ctx: TelegramActionContext, chatId: number): Promise<void> {
     const users = await repository.listUsers(chatId);
     if (users.length === 0) {
-      await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
+      await replyToCommand(ctx, texts.common.noProfilesInGroup);
       return;
     }
 
@@ -1581,7 +1562,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           )
         );
         const messages = chunkRichMessages([
-          { text: `Таблица группы по PSN (${rows.length}):`, entities: [] },
+          { text: texts.table.header(rows.length), entities: [] },
           ...rows
         ]);
         for (const [index, message] of messages.entries()) {
@@ -1616,13 +1597,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         );
         console.log(`[table] upload done ms=${Date.now() - uploadStartedAt}`);
       } else {
-        await replyToCommand(ctx, "Интерфейс отправки фото недоступен.");
+        await replyToCommand(ctx, texts.common.photoUnavailable);
       }
     } catch (error) {
       console.error("[table] failed:", error);
       const message =
-        error instanceof Error ? formatPsnError(error) : "Не удалось получить данные части профилей.";
-      await replyToCommand(ctx, `Не получилось собрать таблицу: ${message}`);
+        error instanceof Error ? formatPsnError(error) : texts.table.failedFallback;
+      await replyToCommand(ctx, texts.table.failed(message));
     }
   }
 
@@ -1632,9 +1613,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     await repository.setResponseMode(chatId, next);
     await replyToCommand(
       ctx,
-      next === "text"
-        ? "Режим ответов: 📝 текст. Сводка, таблица и популярные теперь приходят текстом."
-        : "Режим ответов: 🖼 картинка. Сводка, таблица и популярные снова приходят картинками."
+      next === "text" ? texts.switchMode.text : texts.switchMode.image
     );
   }
 
@@ -1645,36 +1624,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     await replyToCommand(
       ctx,
-      [
-        "Я бот для привязки участников чата к нескольким PSN-аккаунтам.",
-        "",
-        "Основной вход: /menu",
-        "В меню есть кнопки для сводки, таблицы, популярных игр, платин, регионов и действий с PSN ID.",
-        ...(inPrivate
-          ? [
-              "",
-              "В личке я показываю данные группового чата. Выбрать или сменить чат: /chat"
-            ]
-          : []),
-        "",
-        "Быстрые команды остаются доступны:",
-        "/menu — открыть персональное меню",
-        ...(inPrivate ? ["/chat — выбрать чат, данные которого смотреть в личке"] : []),
-        "/link <online-id> — добавить PSN-аккаунт к себе",
-        "/me — показать свои привязанные аккаунты",
-        "/summary [@telegram] — суммарная сводка по игроку",
-        "/summary <psn-id> — сводка напрямую из PSN",
-        "/default <online-id> — выбрать приоритетный аккаунт для summary",
-        "/region [@telegram] — регионы аккаунтов игрока",
-        "/table — общая таблица игроков группы",
-        "/plats [@telegram] — список платин игрока по всем аккаунтам",
-        "/popular — топ-5 игр по числу участников чата",
-        "/popular debug [game] — причины пропусков и поиск игровых бакетов",
-        "/switch_mode — переключить ответы бота между картинкой и текстом",
-        "/unlink [online-id] — удалить один аккаунт или все свои привязки",
-        "/cancel — отменить ввод PSN ID после кнопки меню",
-        "/help — показать эту справку"
-      ].join("\n"),
+      texts.help({ inPrivate }),
       canShowMenu
         ? {
             reply_markup: buildActionMenu(actor.id)
@@ -1715,7 +1665,9 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     ) {
       const cleared = await repository.clearPendingAction(ctx.chat.id, ctx.from.id);
       if (cleared === "summary_psn") {
-        await clearForcedReplyPlaceholder(ctx, ctx.message?.message_id);
+        // Пользователь прервал ввод ника другой командой — у этой команды свой
+        // ответ, поэтому подсказку гасим отдельным постоянным сообщением.
+        await resetInputHint(ctx, ctx.message?.message_id, texts.pending.cancelled);
       }
     }
 
@@ -1745,16 +1697,19 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     const cleared = await repository.clearPendingAction(ctx.chat.id, actor.id);
-    if (cleared === "summary_psn") {
-      await clearForcedReplyPlaceholder(ctx, ctx.msg?.message_id);
-    }
-    await replyToCommand(ctx, "Ок, отменил ожидаемое действие.");
+    await replyToCommand(
+      ctx,
+      texts.pending.cancelled,
+      cleared === "summary_psn" ? { reply_markup: INPUT_HINT_RESET } : undefined
+    );
   });
 
-  // Скрытая дебаг-команда (нигде не анонсируется): форсированно сбрасывает
+  // Скрытая дебаг-команда (нигде не анонсируется): принудительно сбрасывает
   // залипшую серую подсказку из поля ввода (input_field_placeholder от ForceReply,
-  // которую Telegram кеширует на клиенте). Адресуется только вызвавшему и убирает
-  // за собой технические сообщения, включая саму команду.
+  // которую кеширует Telegram для macOS). Шлёт постоянное сообщение с
+  // remove_keyboard (его НЕЛЬЗЯ удалять — иначе macOS откатит состояние ввода).
+  // Если команду прислали ответом на промпт бота — удаляем сам промпт (косметика),
+  // и всегда убираем за собой сообщение с командой.
   bot.command("clearhint", async (ctx) => {
     if (!isSupportedChat(ctx.chat.type)) {
       return;
@@ -1766,9 +1721,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     const commandMessageId = ctx.msg?.message_id;
-    await clearForcedReplyPlaceholder(ctx, commandMessageId, { aggressive: true });
     await repository.clearPendingAction(ctx.chat.id, actor.id);
+    await resetInputHint(ctx, commandMessageId, texts.pending.hintCleared);
 
+    const promptMessageId = ctx.message?.reply_to_message?.message_id;
+    if (promptMessageId !== undefined) {
+      await ctx.api.deleteMessage(ctx.chat.id, promptMessageId).catch(() => {});
+    }
     if (commandMessageId !== undefined) {
       await ctx.api.deleteMessage(ctx.chat.id, commandMessageId).catch(() => {});
     }
@@ -1781,10 +1740,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const actionCtx = ctx as unknown as TelegramActionContext;
 
     if (ensureGroup(ctx.chat.type)) {
-      await replyToCommand(
-        actionCtx,
-        "В группе я и так работаю с этим чатом. Команда /chat нужна только в личке."
-      );
+      await replyToCommand(actionCtx, texts.chat.inGroup);
       return;
     }
 
@@ -1794,7 +1750,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(actionCtx, "Не удалось определить отправителя команды.");
+      await replyToCommand(actionCtx, texts.common.unknownActor);
       return;
     }
 
@@ -1802,7 +1758,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     if (chats.length === 0) {
       await replyToCommand(
         actionCtx,
-        "Я пока не вижу ни одного общего с тобой чата. Добавь меня в нужный чат (или напиши там что-нибудь), потом возвращайся в личку."
+        texts.common.noSharedChats
       );
       return;
     }
@@ -1810,8 +1766,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const current = await repository.getDmChatSelection(actor.id);
     const currentChat = current !== null ? chats.find((chat) => chat.chatId === current) : undefined;
     const header = currentChat
-      ? `Сейчас активен чат: ${formatChatTitle(currentChat)}\nВыбери другой, если нужно:`
-      : "Выбери чат, данные которого показывать в личке:";
+      ? texts.chat.currentActive(formatChatTitle(currentChat))
+      : texts.chat.selectHeader;
 
     await promptChatSelection(actionCtx, actor.id, chats, header);
   });
@@ -1819,13 +1775,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   bot.command("link", async (ctx) => {
     const onlineId = getCommandArg(ctx.message?.text);
     if (!onlineId) {
-      await replyToCommand(ctx, "Укажи PSN Online ID: /link your-online-id");
+      await replyToCommand(ctx, texts.link.needArg);
       return;
     }
 
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return;
     }
 
@@ -1840,7 +1796,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   bot.command("me", async (ctx) => {
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return;
     }
 
@@ -1867,13 +1823,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   bot.command("default", async (ctx) => {
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return;
     }
 
     const onlineId = getCommandArg(ctx.message?.text);
     if (!onlineId) {
-      await replyToCommand(ctx, "Укажи PSN Online ID: /default your-online-id");
+      await replyToCommand(ctx, texts.default.needArg);
       return;
     }
 
@@ -1912,7 +1868,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   bot.command("unlink", async (ctx) => {
     const actor = getActor(ctx);
     if (!actor) {
-      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      await replyToCommand(ctx, texts.common.unknownActor);
       return;
     }
 
@@ -1955,18 +1911,18 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const callbackReceivedAt = Date.now();
     const callback = parseMenuCallbackData(ctx.callbackQuery.data);
     if (!callback) {
-      await safeAnswerCallbackQuery(ctx, "Неизвестное действие меню.");
+      await safeAnswerCallbackQuery(ctx, texts.menuCallback.unknownAction);
       return;
     }
 
     const actor = getActor(ctx);
     if (!actor) {
-      await safeAnswerCallbackQuery(ctx, "Не удалось определить отправителя.");
+      await safeAnswerCallbackQuery(ctx, texts.common.unknownSender);
       return;
     }
 
     if (actor.id !== callback.ownerId) {
-      await safeAnswerCallbackQuery(ctx, "Это меню другого участника. Отправь /menu");
+      await safeAnswerCallbackQuery(ctx, texts.menuCallback.otherUserMenu);
       return;
     }
 
@@ -1983,14 +1939,14 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         try {
           await ctx.editMessageReplyMarkup({ reply_markup: undefined });
         } catch {
-          await replyToCommand(ctx, "Меню закрыто.");
+          await replyToCommand(ctx, texts.menuCallback.closed);
         }
       }
       return;
     }
 
     if (!ctx.chat || !isSupportedChat(ctx.chat.type)) {
-      await replyToCommand(ctx, "Бот работает в группах и в личке.");
+      await replyToCommand(ctx, texts.common.unsupportedChat);
       return;
     }
 
@@ -2000,7 +1956,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    const loadingMessage = await ctx.reply("Пожалуйста, подождите", {
+    const loadingMessage = await ctx.reply(texts.menuCallback.loading, {
       reply_parameters: ctx.msg
         ? {
             message_id: ctx.msg.message_id
@@ -2052,18 +2008,18 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   bot.callbackQuery(/^selchat:/, async (ctx) => {
     const parsed = parseChatSelectCallbackData(ctx.callbackQuery.data);
     if (!parsed) {
-      await safeAnswerCallbackQuery(ctx, "Не понял выбор чата.");
+      await safeAnswerCallbackQuery(ctx, texts.chat.invalidSelect);
       return;
     }
 
     const actor = getActor(ctx);
     if (!actor) {
-      await safeAnswerCallbackQuery(ctx, "Не удалось определить отправителя.");
+      await safeAnswerCallbackQuery(ctx, texts.common.unknownSender);
       return;
     }
 
     if (actor.id !== parsed.ownerId) {
-      await safeAnswerCallbackQuery(ctx, "Это выбор другого пользователя. Отправь /chat");
+      await safeAnswerCallbackQuery(ctx, texts.chat.otherUserSelect);
       return;
     }
 
@@ -2071,13 +2027,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     const known = await repository.listKnownChats();
     const chosen = known.find((chat) => chat.chatId === parsed.chatId);
-    const title = chosen ? formatChatTitle(chosen) : `Чат ${parsed.chatId}`;
+    const title = chosen ? formatChatTitle(chosen) : texts.chat.titleFallback(parsed.chatId);
 
-    await safeAnswerCallbackQuery(ctx, `Выбран чат: ${title}`);
+    await safeAnswerCallbackQuery(ctx, texts.chat.selectedToast(title));
 
     // Обновляем текст, но сохраняем кнопки: можно сразу переключиться на другой чат.
     try {
-      await ctx.editMessageText(`Активный чат: ${title}\n\nМожно переключиться кнопкой ниже или открыть /menu.`, {
+      await ctx.editMessageText(texts.chat.activeConfirmation(title), {
         reply_markup: ctx.callbackQuery.message?.reply_markup
       });
     } catch {
@@ -2108,17 +2064,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     if (Date.parse(pending.expires_at) <= Date.now()) {
       await repository.clearPendingAction(ctx.chat.id, actor.id);
-      if (pending.action === "summary_psn") {
-        await clearForcedReplyPlaceholder(ctx, ctx.message.message_id);
-      }
-      await replyToCommand(ctx, "Ожидаемое действие истекло. Открой /menu и попробуй ещё раз.");
+      // Подсказку ввода сбрасываем через тот же ответ (remove_keyboard на сообщении,
+      // которое остаётся в чате), а не отдельным сообщением — см. resetInputHint.
+      await replyToCommand(
+        ctx,
+        texts.pending.expired,
+        pending.action === "summary_psn" ? { reply_markup: INPUT_HINT_RESET } : undefined
+      );
       return;
     }
 
     await repository.clearPendingAction(ctx.chat.id, actor.id);
-    if (pending.action === "summary_psn") {
-      await clearForcedReplyPlaceholder(ctx, ctx.message.message_id);
-    }
 
     const chatId = await resolveCommandChat(ctx);
     if (chatId === null) {
@@ -2130,7 +2086,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         await handleLink(ctx, chatId, actor, text);
         return;
       case "summary_psn":
-        await handleSummary(ctx, chatId, actor, text);
+        // true → сводка уедет с remove_keyboard, чтобы убрать залипшую подсказку.
+        await handleSummary(ctx, chatId, actor, text, true);
         return;
       case "default":
         await handleDefault(ctx, chatId, actor, text);
