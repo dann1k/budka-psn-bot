@@ -42,10 +42,12 @@ const SUMMARY_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * SUMMARY_RENDER_SCAL
 const CARD_BACKGROUND = "#070b19";
 
 // Max output pixels (width * height) for growable cards. ~1.05M px (960x1100, the
-// old 1.2x leaderboard) blew the CPU budget and the worker was killed; ~0.7M px
-// rasterizes comfortably within the ~2s CPU limit. MIN_OUTPUT_WIDTH keeps very
-// large tables legible at the cost of slightly exceeding the budget.
-const RASTER_PIXEL_BUDGET = 700_000;
+// old 1.2x leaderboard) blew the CPU budget WITH full-size avatars + radial
+// gradients. After Lane 1 (small avatars + flat backgrounds) the per-pixel cost
+// dropped, so a typical table now renders at native 1.0x within budget.
+// MIN_OUTPUT_WIDTH keeps very large tables legible at the cost of slightly
+// exceeding the budget.
+const RASTER_PIXEL_BUDGET = 1_000_000;
 const MIN_OUTPUT_WIDTH = 560;
 
 function computeOutputWidth(logicalWidth: number, logicalHeight: number, maxScale: number): number {
@@ -613,11 +615,13 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   const bottomMargin = 40;
   const calculatedHeight = headerHeight + players.length * rowHeight + bottomMargin;
 
+  const renderStartedAt = Date.now();
+
   // Parallel pre-fetching of all player avatars and flags
   const avatarsAndFlags = await Promise.all(
     players.map(async (player) => {
       const summary = player.accountSummaries[0];
-      const avatarUrl = summary?.avatarUrl;
+      const avatarUrl = summary?.avatarUrlSmall ?? summary?.avatarUrl;
       const regionCode = summary?.region?.code;
       const [avatar, flag] = await Promise.all([
         fetchImageBase64(avatarUrl),
@@ -626,6 +630,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
       return { avatar, flag, regionCode };
     })
   );
+  const imagesFetchedAt = Date.now();
 
   const leaderboardHtml = (
     <div
@@ -638,7 +643,6 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
         fontFamily: "Inter",
         color: "white",
         padding: "35px",
-        backgroundImage: "radial-gradient(circle at 50% 10%, rgba(59, 130, 246, 0.15), transparent 50%), radial-gradient(circle at 10% 90%, rgba(139, 92, 246, 0.08), transparent 50%)",
         border: "1.5px solid rgba(255, 255, 255, 0.08)",
         boxSizing: "border-box",
       }}
@@ -886,16 +890,22 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
       },
     ],
   });
+  const satoriDoneAt = Date.now();
 
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1),
+      value: outputWidth,
     },
   });
 
   const pngData = resvg.render();
-  return pngData.asPng();
+  const png = pngData.asPng();
+  console.log(
+    `[leaderboard-render] players=${players.length} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
+  );
+  return png;
 }
 
 export async function renderPopularGames(games: PopularGameCardItem[]): Promise<Uint8Array> {
@@ -919,7 +929,9 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
     headerHeight +
     rowHeights.reduce((sum, h) => sum + h + rowMarginBottom, 0) +
     bottomMargin;
+  const renderStartedAt = Date.now();
   const covers = await Promise.all(topGames.map((game) => fetchImageBase64(game.imageUrl)));
+  const imagesFetchedAt = Date.now();
   const pillColors = ["#2563eb", "#059669", "#b45309", "#9333ea", "#be123c"];
 
   const popularHtml = (
@@ -933,7 +945,6 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
         fontFamily: "Inter",
         color: "white",
         padding: "34px 42px",
-        backgroundImage: "radial-gradient(circle at 12% 8%, rgba(14, 165, 233, 0.22), transparent 42%), radial-gradient(circle at 88% 24%, rgba(168, 85, 247, 0.18), transparent 38%), radial-gradient(circle at 82% 96%, rgba(59, 130, 246, 0.20), transparent 42%)",
         border: "1.5px solid rgba(255, 255, 255, 0.08)",
         boxSizing: "border-box",
       }}
@@ -1112,14 +1123,20 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
       },
     ],
   });
+  const satoriDoneAt = Date.now();
 
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1),
+      value: outputWidth,
     },
   });
 
   const pngData = resvg.render();
-  return pngData.asPng();
+  const png = pngData.asPng();
+  console.log(
+    `[popular-render] games=${topGames.length} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
+  );
+  return png;
 }

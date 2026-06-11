@@ -12,6 +12,9 @@ export type PsnSummary = {
   accountId: string;
   profileUrl: string;
   avatarUrl: string | null;
+  // Smaller avatar variant for compact, multi-avatar cards (leaderboard) so resvg
+  // doesn't decode 11 full-size avatars per render.
+  avatarUrlSmall: string | null;
   hasPlus: boolean;
   presence: {
     status: "playing" | "online" | "offline";
@@ -178,6 +181,9 @@ function normalizeGameName(value: string): string {
 }
 
 const AVATAR_SIZE_PRIORITY: Record<string, number> = { xl: 4, l: 3, m: 2, s: 1 };
+// Preference for compact cards: medium first (legible at ~90-110px display), then
+// fall back outward. Avoids embedding the xl avatar just to shrink it in resvg.
+const SMALL_AVATAR_SIZE_PREFERENCE = ["m", "s", "l", "xl"] as const;
 
 function pickLargestAvatarUrl(
   avatarUrls: ReadonlyArray<{ size?: string | null; avatarUrl?: string | null }> | undefined,
@@ -196,6 +202,22 @@ function pickLargestAvatarUrl(
   }
 
   return best?.url ?? null;
+}
+
+function pickAvatarUrlBySize(
+  avatarUrls: ReadonlyArray<{ size?: string | null; avatarUrl?: string | null }> | undefined,
+  preference: readonly string[],
+): string | null {
+  if (!avatarUrls?.length) return null;
+
+  for (const size of preference) {
+    const match = avatarUrls.find((entry) => entry?.size?.toLowerCase() === size && entry?.avatarUrl);
+    if (match?.avatarUrl) {
+      return match.avatarUrl;
+    }
+  }
+
+  return pickLargestAvatarUrl(avatarUrls);
 }
 
 type AuthState = {
@@ -477,6 +499,7 @@ export class PsnService {
         accountId: profile.accountId,
         profileUrl,
         avatarUrl: pickLargestAvatarUrl(profile.avatarUrls),
+        avatarUrlSmall: pickAvatarUrlBySize(profile.avatarUrls, SMALL_AVATAR_SIZE_PREFERENCE),
         hasPlus: profile.plus === 1,
         presence,
         recentGames: playedGamesRich.map((g) => g.name),
