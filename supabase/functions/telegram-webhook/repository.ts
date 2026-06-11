@@ -3,6 +3,8 @@ import type { LinkedAccount, LinkedUser } from "./types.ts";
 
 export type PendingTelegramAction = "link" | "summary_psn" | "default" | "unlink";
 
+export type ResponseMode = "image" | "text";
+
 type LinkedAccountRow = {
   chat_id: number | string;
   user_id: number | string;
@@ -300,5 +302,34 @@ export class LinkRepository {
       .eq("user_id", userId);
 
     assertNoError(error, "Не получилось очистить ожидаемое действие");
+  }
+
+  async getResponseMode(chatId: number): Promise<ResponseMode> {
+    const { data, error } = await this.supabase
+      .from("chat_settings")
+      .select("response_mode")
+      .eq("chat_id", chatId)
+      .maybeSingle();
+
+    assertNoError(error, "Не получилось получить режим ответов чата");
+
+    return (data as { response_mode?: string } | null)?.response_mode === "text" ? "text" : "image";
+  }
+
+  async setResponseMode(chatId: number, mode: ResponseMode): Promise<void> {
+    const { error } = await this.supabase
+      .from("chat_settings")
+      .upsert(
+        {
+          chat_id: chatId,
+          response_mode: mode,
+          updated_at: new Date().toISOString()
+        },
+        {
+          onConflict: "chat_id"
+        }
+      );
+
+    assertNoError(error, "Не получилось сохранить режим ответов чата");
   }
 }

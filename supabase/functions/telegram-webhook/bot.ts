@@ -733,9 +733,41 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   }
 
   async function handleSummary(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
+    const responseMode = await repository.getResponseMode(ctx.chat.id);
+
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
         const summary = await psnService.getSummaryByOnlineId(targetArg);
+
+        if (responseMode === "text") {
+          const summaryMessage = formatSummary(
+            {
+              primaryAccount: {
+                onlineId: summary.onlineId,
+                regionCode: summary.region?.code,
+                hasPlus: summary.hasPlus,
+                status: summary.presence.status,
+                lastOnline: summary.presence.lastOnline,
+                currentGames: summary.presence.currentGames,
+                recentGames: summary.recentGames
+              },
+              otherAccounts: [],
+              level: summary.level,
+              progress: summary.progress,
+              trophies: summary.trophies
+            },
+            config.emojis
+          );
+          const prefix = "Данные напрямую из PSN\n\n";
+          await replySummary(
+            ctx,
+            `${prefix}${summaryMessage.text}`,
+            shiftEntities(summaryMessage.entities, prefix),
+            summary.avatarUrl
+          );
+          return;
+        }
+
         const mockPlayer: AggregatedPlayer = {
           user: {
             userId: 0,
@@ -787,6 +819,28 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     try {
       const aggregated = await loadAggregatedPlayer(targetUser);
       const preferred = pickPreferredAccount(aggregated);
+
+      if (responseMode === "text") {
+        const summaryMessage = formatSummary(
+          {
+            primaryAccount: aggregated.accounts[preferred.index],
+            otherAccounts: aggregated.accounts.filter((_, index) => index !== preferred.index),
+            level: aggregated.level,
+            progress: aggregated.progress,
+            trophies: aggregated.trophies
+          },
+          config.emojis
+        );
+        const prefix = `${formatTelegramName(targetUser)}\n\n`;
+        await replySummary(
+          ctx,
+          `${prefix}${summaryMessage.text}`,
+          shiftEntities(summaryMessage.entities, prefix),
+          preferred.summary.avatarUrl
+        );
+        return;
+      }
+
       const cardPng = await renderGamerCard(aggregated, preferred.summary);
 
       if (ctx.replyWithPhoto) {
@@ -1156,7 +1210,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
       : [];
 
-    if (!isDebug && ctx.replyWithPhoto) {
+    const responseMode = await repository.getResponseMode(ctx.chat.id);
+    if (!isDebug && responseMode === "image" && ctx.replyWithPhoto) {
       const renderInput = topGames.map((game) => ({
         name: game.name,
         imageUrl: game.imageUrl,
@@ -1284,6 +1339,37 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return getTrophyWeight(b) - getTrophyWeight(a);
       });
 
+      const responseMode = await repository.getResponseMode(ctx.chat.id);
+      if (responseMode === "text") {
+        const rows = sorted.map((player) =>
+          formatLeaderboardRow(
+            {
+              telegramLabel: formatTelegramName(player.user),
+              accounts: player.accounts,
+              level: player.level,
+              trophies: player.trophies
+            },
+            config.emojis
+          )
+        );
+        const messages = chunkRichMessages([
+          { text: `Таблица группы по PSN (${rows.length}):`, entities: [] },
+          ...rows
+        ]);
+        for (const [index, message] of messages.entries()) {
+          await ctx.reply(
+            message.text,
+            index === 0 && ctx.msg
+              ? {
+                  entities: message.entities,
+                  reply_parameters: { message_id: ctx.msg.message_id }
+                }
+              : { entities: message.entities }
+          );
+        }
+        return;
+      }
+
       const renderStartedAt = Date.now();
       const tablePng = await renderLeaderboard(sorted);
       console.log(
@@ -1312,6 +1398,18 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
+  async function handleSwitchMode(ctx: TelegramActionContext): Promise<void> {
+    const current = await repository.getResponseMode(ctx.chat.id);
+    const next = current === "image" ? "text" : "image";
+    await repository.setResponseMode(ctx.chat.id, next);
+    await replyToCommand(
+      ctx,
+      next === "text"
+        ? "Режим ответов: 📝 текст. Сводка, таблица и популярные теперь приходят текстом."
+        : "Режим ответов: 🖼 картинка. Сводка, таблица и популярные снова приходят картинками."
+    );
+  }
+
   async function sendHelp(ctx: TelegramActionContext) {
     const actor = getActor(ctx);
     const canShowMenu = actor && ensureGroup(ctx.chat.type);
@@ -1336,6 +1434,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "/plats [@telegram] — список платин игрока по всем аккаунтам",
         "/popular — топ-5 игр по числу участников чата",
         "/popular debug [game] — причины пропусков и поиск игровых бакетов",
+        "/switch_mode — переключить ответы бота между картинкой и текстом",
         "/unlink [online-id] — удалить один аккаунт или все свои привязки",
         "/cancel — отменить ввод PSN ID после кнопки меню",
         "/help — показать эту справку"
@@ -1505,6 +1604,15 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     await handleTable(ctx);
+  });
+
+  bot.command("switch_mode", async (ctx) => {
+    if (!ensureGroup(ctx.chat.type)) {
+      await replyToCommand(ctx, "Эта команда работает только в группах.");
+      return;
+    }
+
+    await handleSwitchMode(ctx);
   });
 
   bot.callbackQuery(/^menu:/, async (ctx) => {
