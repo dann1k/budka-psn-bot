@@ -306,14 +306,20 @@ export class LinkRepository {
     return data ? (data as PendingActionRow) : null;
   }
 
-  async clearPendingAction(chatId: number, userId: number): Promise<void> {
-    const { error } = await this.supabase
+  async clearPendingAction(
+    chatId: number,
+    userId: number
+  ): Promise<PendingTelegramAction | null> {
+    const { data, error } = await this.supabase
       .from("telegram_pending_actions")
       .delete()
       .eq("chat_id", chatId)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .select("action")
+      .maybeSingle();
 
     assertNoError(error, "Не получилось очистить ожидаемое действие");
+    return data ? (data as { action: PendingTelegramAction }).action : null;
   }
 
   async getResponseMode(chatId: number): Promise<ResponseMode> {

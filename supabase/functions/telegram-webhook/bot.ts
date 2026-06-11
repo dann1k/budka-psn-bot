@@ -323,6 +323,52 @@ async function replySummary(
   await replyToCommand(ctx, text, { entities });
 }
 
+// Telegram pins a ForceReply's input_field_placeholder in the client's per-chat
+// input state and gives the bot no "reply answered" signal, so the grey hint can
+// stick (get cached) even after the prompt is consumed/cancelled/expired. The only
+// way to drop it is to overwrite that state with a fresh reply markup: we send a
+// blank carrier message carrying ReplyKeyboardRemove — scoped to the one user via
+// selective + a reply to their own message — then delete the carrier (the client
+// has already collapsed the input state by then). `aggressive` first re-renders the
+// input with a placeholder-less force_reply for sticky clients (TelegramSwift#1103),
+// then always ends on remove_keyboard so the input returns to a normal state.
+// Refs: grammyjs/stateless-question; tdlib/telegram-bot-api#471.
+async function clearForcedReplyPlaceholder(
+  ctx: Context,
+  targetMessageId: number | undefined,
+  options: { aggressive?: boolean } = {}
+): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (chatId === undefined) {
+    return;
+  }
+
+  const replyParameters = targetMessageId !== undefined
+    ? { message_id: targetMessageId, allow_sending_without_reply: true }
+    : undefined;
+
+  const sendReset = async (
+    replyMarkup: { remove_keyboard: true; selective: true } | { force_reply: true; selective: true }
+  ): Promise<void> => {
+    try {
+      const carrier = await ctx.api.sendMessage(chatId, "⠀", {
+        reply_parameters: replyParameters,
+        reply_markup: replyMarkup
+      });
+      await ctx.api.deleteMessage(chatId, carrier.message_id).catch(() => {});
+    } catch (error) {
+      console.warn(
+        `[placeholder] reset failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
+
+  if (options.aggressive) {
+    await sendReset({ force_reply: true, selective: true });
+  }
+  await sendReset({ remove_keyboard: true, selective: true });
+}
+
 function isTelegramHandle(value: string | null): boolean {
   return Boolean(value && value.trim().startsWith("@"));
 }
@@ -1667,7 +1713,10 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       isSupportedChat(ctx.chat.type) &&
       ctx.from
     ) {
-      await repository.clearPendingAction(ctx.chat.id, ctx.from.id);
+      const cleared = await repository.clearPendingAction(ctx.chat.id, ctx.from.id);
+      if (cleared === "summary_psn") {
+        await clearForcedReplyPlaceholder(ctx, ctx.message?.message_id);
+      }
     }
 
     await next();
@@ -1695,8 +1744,34 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await repository.clearPendingAction(ctx.chat.id, actor.id);
+    const cleared = await repository.clearPendingAction(ctx.chat.id, actor.id);
+    if (cleared === "summary_psn") {
+      await clearForcedReplyPlaceholder(ctx, ctx.msg?.message_id);
+    }
     await replyToCommand(ctx, "Ок, отменил ожидаемое действие.");
+  });
+
+  // Скрытая дебаг-команда (нигде не анонсируется): форсированно сбрасывает
+  // залипшую серую подсказку из поля ввода (input_field_placeholder от ForceReply,
+  // которую Telegram кеширует на клиенте). Адресуется только вызвавшему и убирает
+  // за собой технические сообщения, включая саму команду.
+  bot.command("clearhint", async (ctx) => {
+    if (!isSupportedChat(ctx.chat.type)) {
+      return;
+    }
+
+    const actor = await requireActor(ctx);
+    if (!actor) {
+      return;
+    }
+
+    const commandMessageId = ctx.msg?.message_id;
+    await clearForcedReplyPlaceholder(ctx, commandMessageId, { aggressive: true });
+    await repository.clearPendingAction(ctx.chat.id, actor.id);
+
+    if (commandMessageId !== undefined) {
+      await ctx.api.deleteMessage(ctx.chat.id, commandMessageId).catch(() => {});
+    }
   });
 
   // Скрытая команда (нигде не анонсируется в групповой справке): в личке
@@ -2033,11 +2108,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     if (Date.parse(pending.expires_at) <= Date.now()) {
       await repository.clearPendingAction(ctx.chat.id, actor.id);
+      if (pending.action === "summary_psn") {
+        await clearForcedReplyPlaceholder(ctx, ctx.message.message_id);
+      }
       await replyToCommand(ctx, "Ожидаемое действие истекло. Открой /menu и попробуй ещё раз.");
       return;
     }
 
     await repository.clearPendingAction(ctx.chat.id, actor.id);
+    if (pending.action === "summary_psn") {
+      await clearForcedReplyPlaceholder(ctx, ctx.message.message_id);
+    }
 
     const chatId = await resolveCommandChat(ctx);
     if (chatId === null) {
