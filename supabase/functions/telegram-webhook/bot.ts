@@ -8,7 +8,7 @@ import {
   type AccountLabel
 } from "./format.ts";
 import { LinkRepository } from "./repository.ts";
-import type { PendingTelegramAction } from "./repository.ts";
+import type { KnownChat, PendingTelegramAction } from "./repository.ts";
 import {
   PsnNpssoInvalidError,
   PsnPrivateProfileError,
@@ -112,6 +112,21 @@ function ensureGroup(chatType: string): boolean {
   return chatType === "group" || chatType === "supergroup";
 }
 
+function isPrivateChat(chatType: string): boolean {
+  return chatType === "private";
+}
+
+// Бот сделан для конкретного группового чата, но в личке тоже работает:
+// там он показывает данные выбранного группового чата (см. resolveDmChat).
+function isSupportedChat(chatType: string): boolean {
+  return ensureGroup(chatType) || isPrivateChat(chatType);
+}
+
+function formatChatTitle(chat: KnownChat): string {
+  const title = chat.title?.trim();
+  return title && title.length > 0 ? title : `Чат ${chat.chatId}`;
+}
+
 function getDisplayName(user: { first_name: string; last_name?: string }): string {
   return [user.first_name, user.last_name].filter(Boolean).join(" ");
 }
@@ -180,6 +195,29 @@ function chunkRichMessages(
 
 function utf16Length(value: string): number {
   return [...value].reduce((length, char) => length + (char.codePointAt(0)! > 0xffff ? 2 : 1), 0);
+}
+
+// Inline mention of the actor as a leading text_mention entity. A ForceReply with
+// selective:true is targeted at users mentioned in the prompt, so this keeps the
+// forced reply scoped to the person who tapped the button in a group chat.
+function buildActorMention(actor: TelegramActor): { text: string; entities: MessageEntity[] } {
+  const name = getDisplayName(actor);
+  return {
+    text: name,
+    entities: [
+      {
+        type: "text_mention",
+        offset: 0,
+        length: utf16Length(name),
+        user: {
+          id: actor.id,
+          is_bot: false,
+          first_name: actor.first_name,
+          last_name: actor.last_name
+        }
+      }
+    ]
+  };
 }
 
 function formatPsnError(error: unknown, onlineId?: string): string {
@@ -389,6 +427,22 @@ function formatPopularGameRow(game: PopularGameAccumulator, index: number): { te
   };
 }
 
+function buildChatSelectCallbackData(ownerId: number, chatId: number): string {
+  return `selchat:${ownerId}:${chatId}`;
+}
+
+function parseChatSelectCallbackData(value: string | undefined): { ownerId: number; chatId: number } | null {
+  const match = /^selchat:(\d+):(-?\d+)$/.exec(value ?? "");
+  if (!match) {
+    return null;
+  }
+
+  return {
+    ownerId: Number(match[1]),
+    chatId: Number(match[2])
+  };
+}
+
 function buildMenuCallbackData(ownerId: number, action: MenuAction): string {
   return `menu:${ownerId}:${action}`;
 }
@@ -507,6 +561,124 @@ function formatPopularSkipReason(error: unknown): string {
 export function createBot(config: BotConfig, repository: LinkRepository, psnService: PsnService): Bot {
   const bot = new Bot(config.botToken);
 
+  // Состоит ли пользователь в чате прямо сейчас. Нужно, чтобы в личке не
+  // предлагать (и не отдавать) данные чатов, к которым человек отношения не имеет.
+  async function isUserInChat(chatId: number, userId: number): Promise<boolean> {
+    try {
+      const member = await bot.api.getChatMember(chatId, userId);
+      if (member.status === "left" || member.status === "kicked") {
+        return false;
+      }
+      if (member.status === "restricted") {
+        return member.is_member === true;
+      }
+      return true;
+    } catch (error) {
+      console.warn(
+        `[dm] getChatMember failed chat=${chatId} user=${userId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  // Чаты, по которым пользователь может смотреть данные в личке: известные боту
+  // чаты, где пользователь сейчас состоит, плюс чаты с его привязками (там он
+  // точно участник, даже если getChatMember недоступен).
+  async function listSelectableChats(userId: number): Promise<KnownChat[]> {
+    const [known, linkedChatIds] = await Promise.all([
+      repository.listKnownChats(),
+      repository.listUserChatIds(userId)
+    ]);
+
+    const candidates = new Map<number, KnownChat>();
+    for (const chat of known) {
+      candidates.set(chat.chatId, chat);
+    }
+    const linkedSet = new Set(linkedChatIds);
+    for (const chatId of linkedChatIds) {
+      if (!candidates.has(chatId)) {
+        candidates.set(chatId, { chatId, title: null, type: "group" });
+      }
+    }
+
+    const checked = await mapWithConcurrency([...candidates.values()], 4, async (chat) => {
+      if (linkedSet.has(chat.chatId)) {
+        return chat;
+      }
+      return (await isUserInChat(chat.chatId, userId)) ? chat : null;
+    });
+
+    return checked.filter((chat): chat is KnownChat => chat !== null);
+  }
+
+  async function promptChatSelection(
+    ctx: TelegramActionContext,
+    ownerId: number,
+    chats: KnownChat[],
+    header: string
+  ): Promise<void> {
+    const keyboard = new InlineKeyboard();
+    for (const chat of chats) {
+      keyboard.text(formatChatTitle(chat), buildChatSelectCallbackData(ownerId, chat.chatId)).row();
+    }
+
+    await replyToCommand(ctx, header, { reply_markup: keyboard });
+  }
+
+  // Определяет групповой чат, данные которого показывать в личке. Возвращает
+  // chatId, либо null — если сообщение уже отправлено пользователю (нет общих
+  // чатов / нужно выбрать из нескольких).
+  async function resolveDmChat(ctx: TelegramActionContext, actor: TelegramActor): Promise<number | null> {
+    const stored = await repository.getDmChatSelection(actor.id);
+    if (stored !== null) {
+      return stored;
+    }
+
+    const chats = await listSelectableChats(actor.id);
+    if (chats.length === 0) {
+      await replyToCommand(
+        ctx,
+        "Я пока не вижу ни одного общего с тобой чата. Добавь меня в нужный чат (или напиши там что-нибудь), потом возвращайся в личку."
+      );
+      return null;
+    }
+
+    if (chats.length === 1) {
+      await repository.setDmChatSelection(actor.id, chats[0].chatId);
+      return chats[0].chatId;
+    }
+
+    await promptChatSelection(
+      ctx,
+      actor.id,
+      chats,
+      "Выбери чат, данные которого показывать в личке:"
+    );
+    return null;
+  }
+
+  // Чат, с данными которого работает команда: сам групповой чат, либо выбранный
+  // в личке. null означает, что пользователю уже отправлен ответ и обработку
+  // нужно прекратить.
+  async function resolveCommandChat(ctx: TelegramActionContext): Promise<number | null> {
+    if (ensureGroup(ctx.chat.type)) {
+      return ctx.chat.id;
+    }
+
+    if (!isPrivateChat(ctx.chat.type)) {
+      await replyToCommand(ctx, "Бот работает в группах и в личке.");
+      return null;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(ctx, "Не удалось определить отправителя команды.");
+      return null;
+    }
+
+    return resolveDmChat(ctx, actor);
+  }
+
   async function resolveTargetUser(
     chatId: number,
     actor: { id: number } | null,
@@ -589,15 +761,6 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     };
   }
 
-  async function ensureGroupContext(ctx: TelegramActionContext): Promise<boolean> {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return false;
-    }
-
-    return true;
-  }
-
   async function requireActor(ctx: TelegramActionContext): Promise<TelegramActor | null> {
     const actor = getActor(ctx);
     if (!actor) {
@@ -609,12 +772,15 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   }
 
   async function sendActionMenu(ctx: TelegramActionContext): Promise<void> {
-    if (!(await ensureGroupContext(ctx))) {
+    const actor = await requireActor(ctx);
+    if (!actor) {
       return;
     }
 
-    const actor = await requireActor(ctx);
-    if (!actor) {
+    // Убеждаемся, что есть чат данных (в личке это может вывести выбор чата);
+    // если нет — resolveCommandChat уже ответил пользователю, меню не показываем.
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
@@ -630,6 +796,22 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   ): Promise<void> {
     await repository.setPendingAction(ctx.chat.id, actor.id, action);
 
+    if (action === "summary_psn") {
+      // No verbose bot reply: just focus the user's input with a grey hint
+      // ("Введите ник @Telegram или ник PSN") via ForceReply. The next text they
+      // send is picked up by the pending-action flow and routed to handleSummary.
+      const mention = buildActorMention(actor);
+      await replyToCommand(ctx, `${mention.text}, чья сводка?`, {
+        entities: mention.entities,
+        reply_markup: {
+          force_reply: true,
+          selective: true,
+          input_field_placeholder: "Введите ник @Telegram или ник PSN"
+        }
+      });
+      return;
+    }
+
     const hints: Record<PendingTelegramAction, string> = {
       link: "Пришли PSN Online ID, который нужно привязать.",
       summary_psn: "Пришли @telegram участника чата или PSN Online ID. Для своей сводки можно просто нажать «Моя сводка».",
@@ -640,8 +822,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     await replyToCommand(ctx, `${PENDING_ACTION_LABELS[action]}\n${hints[action]}\n\nОтмена: /cancel`);
   }
 
-  async function handleLink(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string): Promise<void> {
-    const existingOwner = await repository.getAccountOwner(ctx.chat.id, onlineId);
+  async function handleLink(ctx: TelegramActionContext, chatId: number, actor: TelegramActor, onlineId: string): Promise<void> {
+    const existingOwner = await repository.getAccountOwner(chatId, onlineId);
     if (existingOwner && existingOwner.userId !== actor.id) {
       await replyToCommand(
         ctx,
@@ -657,7 +839,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     try {
       const summary = await psnService.getSummaryByOnlineId(onlineId);
-      const canonicalOwner = await repository.getAccountOwner(ctx.chat.id, summary.onlineId);
+      const canonicalOwner = await repository.getAccountOwner(chatId, summary.onlineId);
 
       if (canonicalOwner && canonicalOwner.userId !== actor.id) {
         await replyToCommand(
@@ -673,7 +855,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       }
 
       await repository.addLink({
-        chatId: ctx.chat.id,
+        chatId,
         userId: actor.id,
         username: actor.username ?? null,
         displayName: getDisplayName(actor),
@@ -681,7 +863,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       });
 
       const aggregated = await loadAggregatedPlayer({
-        chatId: ctx.chat.id,
+        chatId,
         userId: actor.id,
         username: actor.username ?? null,
         displayName: getDisplayName(actor),
@@ -712,15 +894,15 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handleMe(ctx: TelegramActionContext, actor: TelegramActor): Promise<void> {
-    const accounts = await repository.listAccountsByUser(ctx.chat.id, actor.id);
+  async function handleMe(ctx: TelegramActionContext, chatId: number, actor: TelegramActor): Promise<void> {
+    const accounts = await repository.listAccountsByUser(chatId, actor.id);
     if (accounts.length === 0) {
       await replyToCommand(ctx, "У тебя пока нет привязок. Используй /link <online-id> или /menu.");
       return;
     }
 
     await repository.syncUserMetadata({
-      chatId: ctx.chat.id,
+      chatId,
       userId: actor.id,
       username: actor.username ?? null,
       displayName: getDisplayName(actor)
@@ -732,8 +914,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     );
   }
 
-  async function handleSummary(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
-    const responseMode = await repository.getResponseMode(ctx.chat.id);
+  async function handleSummary(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
+    const responseMode = await repository.getResponseMode(chatId);
 
     if (targetArg && !isTelegramHandle(targetArg)) {
       try {
@@ -771,7 +953,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const mockPlayer: AggregatedPlayer = {
           user: {
             userId: 0,
-            chatId: ctx.chat.id,
+            chatId,
             username: null,
             displayName: "Данные из PSN",
             defaultPsnOnlineId: null
@@ -804,7 +986,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    const targetUser = await resolveTargetUser(ctx.chat.id, actor, targetArg);
+    const targetUser = await resolveTargetUser(chatId, actor, targetArg);
 
     if (!targetUser) {
       await replyToCommand(
@@ -861,8 +1043,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handleDefault(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string): Promise<void> {
-    const accounts = await repository.listAccountsByUser(ctx.chat.id, actor.id);
+  async function handleDefault(ctx: TelegramActionContext, chatId: number, actor: TelegramActor, onlineId: string): Promise<void> {
+    const accounts = await repository.listAccountsByUser(chatId, actor.id);
     const match = accounts.find((account) => account.psnOnlineId.toLowerCase() === onlineId.toLowerCase());
 
     if (!match) {
@@ -870,12 +1052,12 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await repository.setDefaultAccount(ctx.chat.id, actor.id, match.psnOnlineId);
+    await repository.setDefaultAccount(chatId, actor.id, match.psnOnlineId);
     await replyToCommand(ctx, `Приоритетный аккаунт для summary: ${match.psnOnlineId}`);
   }
 
-  async function handleRegion(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
-    const targetUser = await resolveTargetUser(ctx.chat.id, actor, targetArg);
+  async function handleRegion(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
+    const targetUser = await resolveTargetUser(chatId, actor, targetArg);
 
     if (!targetUser) {
       await replyToCommand(
@@ -900,8 +1082,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handlePlats(ctx: TelegramActionContext, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
-    const targetUser = await resolveTargetUser(ctx.chat.id, actor, targetArg);
+  async function handlePlats(ctx: TelegramActionContext, chatId: number, actor: TelegramActor | null, targetArg: string | null): Promise<void> {
+    const targetUser = await resolveTargetUser(chatId, actor, targetArg);
 
     if (!targetUser) {
       await replyToCommand(
@@ -914,7 +1096,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     try {
-      const accounts = await repository.listAccountsByUser(ctx.chat.id, targetUser.userId);
+      const accounts = await repository.listAccountsByUser(chatId, targetUser.userId);
       const perAccountTitles = await Promise.all(
         accounts.map((account) => psnService.getPlatinumTitlesByOnlineId(account.psnOnlineId))
       );
@@ -1021,8 +1203,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handleUnlink(ctx: TelegramActionContext, actor: TelegramActor, onlineId: string | null): Promise<void> {
-    const deleted = await repository.deleteLinks(ctx.chat.id, actor.id, onlineId ?? undefined);
+  async function handleUnlink(ctx: TelegramActionContext, chatId: number, actor: TelegramActor, onlineId: string | null): Promise<void> {
+    const deleted = await repository.deleteLinks(chatId, actor.id, onlineId ?? undefined);
 
     if (deleted === 0) {
       await replyToCommand(
@@ -1042,11 +1224,11 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     );
   }
 
-  async function handlePopular(ctx: TelegramActionContext, commandArgs: string[] = []): Promise<void> {
+  async function handlePopular(ctx: TelegramActionContext, chatId: number, commandArgs: string[] = []): Promise<void> {
     const isDebug = commandArgs[0]?.toLowerCase() === "debug";
     const debugSearch = isDebug ? commandArgs.slice(1).join(" ").trim() : "";
     const normalizedDebugSearch = normalizeSearchText(debugSearch);
-    const users = await repository.listUsers(ctx.chat.id);
+    const users = await repository.listUsers(chatId);
     if (users.length === 0) {
       await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
       return;
@@ -1055,7 +1237,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     const accountsByUser = await Promise.all(
       users.map(async (user) => ({
         user,
-        accounts: await repository.listAccountsByUser(ctx.chat.id, user.userId)
+        accounts: await repository.listAccountsByUser(chatId, user.userId)
       }))
     );
     const accountJobs = accountsByUser.flatMap(({ user, accounts }) =>
@@ -1210,7 +1392,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       ? loadedAccounts.filter((account) => !debugMatchedAccountKeys.has(getPopularDebugAccountKey(account)))
       : [];
 
-    const responseMode = await repository.getResponseMode(ctx.chat.id);
+    const responseMode = await repository.getResponseMode(chatId);
     if (!isDebug && responseMode === "image" && ctx.replyWithPhoto) {
       const renderInput = topGames.map((game) => ({
         name: game.name,
@@ -1317,8 +1499,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handleTable(ctx: TelegramActionContext): Promise<void> {
-    const users = await repository.listUsers(ctx.chat.id);
+  async function handleTable(ctx: TelegramActionContext, chatId: number): Promise<void> {
+    const users = await repository.listUsers(chatId);
     if (users.length === 0) {
       await replyToCommand(ctx, "В этой группе пока нет привязанных PSN-профилей.");
       return;
@@ -1339,7 +1521,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return getTrophyWeight(b) - getTrophyWeight(a);
       });
 
-      const responseMode = await repository.getResponseMode(ctx.chat.id);
+      const responseMode = await repository.getResponseMode(chatId);
       if (responseMode === "text") {
         const rows = sorted.map((player) =>
           formatLeaderboardRow(
@@ -1398,10 +1580,10 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   }
 
-  async function handleSwitchMode(ctx: TelegramActionContext): Promise<void> {
-    const current = await repository.getResponseMode(ctx.chat.id);
+  async function handleSwitchMode(ctx: TelegramActionContext, chatId: number): Promise<void> {
+    const current = await repository.getResponseMode(chatId);
     const next = current === "image" ? "text" : "image";
-    await repository.setResponseMode(ctx.chat.id, next);
+    await repository.setResponseMode(chatId, next);
     await replyToCommand(
       ctx,
       next === "text"
@@ -1412,7 +1594,8 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
   async function sendHelp(ctx: TelegramActionContext) {
     const actor = getActor(ctx);
-    const canShowMenu = actor && ensureGroup(ctx.chat.type);
+    const inPrivate = isPrivateChat(ctx.chat.type);
+    const canShowMenu = actor && isSupportedChat(ctx.chat.type);
 
     await replyToCommand(
       ctx,
@@ -1421,9 +1604,16 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         "",
         "Основной вход: /menu",
         "В меню есть кнопки для сводки, таблицы, популярных игр, платин, регионов и действий с PSN ID.",
+        ...(inPrivate
+          ? [
+              "",
+              "В личке я показываю данные группового чата. Выбрать или сменить чат: /chat"
+            ]
+          : []),
         "",
         "Быстрые команды остаются доступны:",
         "/menu — открыть персональное меню",
+        ...(inPrivate ? ["/chat — выбрать чат, данные которого смотреть в личке"] : []),
         "/link <online-id> — добавить PSN-аккаунт к себе",
         "/me — показать свои привязанные аккаунты",
         "/summary [@telegram] — суммарная сводка по игроку",
@@ -1447,9 +1637,36 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     );
   }
 
+  // Запоминаем групповые чаты, чтобы в личке предлагать выбор по понятным
+  // названиям (см. /chat и resolveDmChat). Личные чаты не сохраняем.
+  bot.use(async (ctx, next) => {
+    const chat = ctx.chat;
+    if (chat && ensureGroup(chat.type)) {
+      try {
+        await repository.rememberChat({
+          chatId: chat.id,
+          title: "title" in chat ? (chat.title ?? null) : null,
+          type: chat.type
+        });
+      } catch (error) {
+        console.warn(
+          `[chats] rememberChat failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    await next();
+  });
+
   bot.use(async (ctx, next) => {
     const text = ctx.message?.text?.trim();
-    if (text?.startsWith("/") && !text.startsWith("/cancel") && ctx.chat && ensureGroup(ctx.chat.type) && ctx.from) {
+    if (
+      text?.startsWith("/") &&
+      !text.startsWith("/cancel") &&
+      ctx.chat &&
+      isSupportedChat(ctx.chat.type) &&
+      ctx.from
+    ) {
       await repository.clearPendingAction(ctx.chat.id, ctx.from.id);
     }
 
@@ -1469,7 +1686,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   });
 
   bot.command("cancel", async (ctx) => {
-    if (!(await ensureGroupContext(ctx))) {
+    if (!isSupportedChat(ctx.chat.type)) {
       return;
     }
 
@@ -1482,12 +1699,49 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     await replyToCommand(ctx, "Ок, отменил ожидаемое действие.");
   });
 
-  bot.command("link", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+  // Скрытая команда (нигде не анонсируется в групповой справке): в личке
+  // выбрать групповой чат, данные которого показывать. Нужна, когда бот добавлен
+  // в несколько чатов и иначе нельзя понять, по какому отдавать данные.
+  bot.command("chat", async (ctx) => {
+    const actionCtx = ctx as unknown as TelegramActionContext;
+
+    if (ensureGroup(ctx.chat.type)) {
+      await replyToCommand(
+        actionCtx,
+        "В группе я и так работаю с этим чатом. Команда /chat нужна только в личке."
+      );
       return;
     }
 
+    if (!isPrivateChat(ctx.chat.type)) {
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await replyToCommand(actionCtx, "Не удалось определить отправителя команды.");
+      return;
+    }
+
+    const chats = await listSelectableChats(actor.id);
+    if (chats.length === 0) {
+      await replyToCommand(
+        actionCtx,
+        "Я пока не вижу ни одного общего с тобой чата. Добавь меня в нужный чат (или напиши там что-нибудь), потом возвращайся в личку."
+      );
+      return;
+    }
+
+    const current = await repository.getDmChatSelection(actor.id);
+    const currentChat = current !== null ? chats.find((chat) => chat.chatId === current) : undefined;
+    const header = currentChat
+      ? `Сейчас активен чат: ${formatChatTitle(currentChat)}\nВыбери другой, если нужно:`
+      : "Выбери чат, данные которого показывать в личке:";
+
+    await promptChatSelection(actionCtx, actor.id, chats, header);
+  });
+
+  bot.command("link", async (ctx) => {
     const onlineId = getCommandArg(ctx.message?.text);
     if (!onlineId) {
       await replyToCommand(ctx, "Укажи PSN Online ID: /link your-online-id");
@@ -1500,42 +1754,42 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await handleLink(ctx, actor, onlineId);
-  });
-
-  bot.command("me", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
+    await handleLink(ctx, chatId, actor, onlineId);
+  });
+
+  bot.command("me", async (ctx) => {
     const actor = getActor(ctx);
     if (!actor) {
       await replyToCommand(ctx, "Не удалось определить отправителя команды.");
       return;
     }
 
-    await handleMe(ctx, actor);
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
+      return;
+    }
+
+    await handleMe(ctx, chatId, actor);
   });
 
   bot.command("summary", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
     const actor = getActor(ctx);
     const targetArg = getCommandArg(ctx.message?.text);
 
-    await handleSummary(ctx, actor, targetArg);
-  });
-
-  bot.command("default", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
+    await handleSummary(ctx, chatId, actor, targetArg);
+  });
+
+  bot.command("default", async (ctx) => {
     const actor = getActor(ctx);
     if (!actor) {
       await replyToCommand(ctx, "Не удалось определить отправителя команды.");
@@ -1548,71 +1802,78 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    await handleDefault(ctx, actor, onlineId);
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
+      return;
+    }
+
+    await handleDefault(ctx, chatId, actor, onlineId);
   });
 
   bot.command("region", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const actor = getActor(ctx);
+    const targetArg = getCommandArg(ctx.message?.text);
+
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
-    const actor = getActor(ctx);
-    const targetArg = getCommandArg(ctx.message?.text);
-    await handleRegion(ctx, actor, targetArg);
+    await handleRegion(ctx, chatId, actor, targetArg);
   });
 
   bot.command("plats", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const actor = getActor(ctx);
+    const targetArg = getCommandArg(ctx.message?.text);
+
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
-    const actor = getActor(ctx);
-    const targetArg = getCommandArg(ctx.message?.text);
-    await handlePlats(ctx, actor, targetArg);
+    await handlePlats(ctx, chatId, actor, targetArg);
   });
 
   bot.command("unlink", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
-      return;
-    }
-
     const actor = getActor(ctx);
     if (!actor) {
       await replyToCommand(ctx, "Не удалось определить отправителя команды.");
       return;
     }
 
-    await handleUnlink(ctx, actor, getCommandArg(ctx.message?.text));
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
+      return;
+    }
+
+    await handleUnlink(ctx, chatId, actor, getCommandArg(ctx.message?.text));
   });
 
   bot.command("popular", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
-    await handlePopular(ctx, getCommandArgs(ctx.message?.text));
+    await handlePopular(ctx, chatId, getCommandArgs(ctx.message?.text));
   });
 
   bot.command("table", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
-    await handleTable(ctx);
+    await handleTable(ctx, chatId);
   });
 
   bot.command("switch_mode", async (ctx) => {
-    if (!ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
       return;
     }
 
-    await handleSwitchMode(ctx);
+    await handleSwitchMode(ctx, chatId);
   });
 
   bot.callbackQuery(/^menu:/, async (ctx) => {
@@ -1653,12 +1914,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    if (!ctx.chat || !ensureGroup(ctx.chat.type)) {
-      await replyToCommand(ctx, "Эта команда работает только в группах.");
+    if (!ctx.chat || !isSupportedChat(ctx.chat.type)) {
+      await replyToCommand(ctx, "Бот работает в группах и в личке.");
       return;
     }
 
     const actionCtx = ctx as unknown as TelegramActionContext;
+    const chatId = await resolveCommandChat(actionCtx);
+    if (chatId === null) {
+      return;
+    }
+
     const loadingMessage = await ctx.reply("Пожалуйста, подождите", {
       reply_parameters: ctx.msg
         ? {
@@ -1672,22 +1938,22 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     try {
       switch (callback.action) {
         case "summary":
-          await handleSummary(actionCtx, actor, null);
+          await handleSummary(actionCtx, chatId, actor, null);
           return;
         case "me":
-          await handleMe(actionCtx, actor);
+          await handleMe(actionCtx, chatId, actor);
           return;
         case "table":
-          await handleTable(actionCtx);
+          await handleTable(actionCtx, chatId);
           return;
         case "popular":
-          await handlePopular(actionCtx);
+          await handlePopular(actionCtx, chatId);
           return;
         case "plats":
-          await handlePlats(actionCtx, actor, null);
+          await handlePlats(actionCtx, chatId, actor, null);
           return;
         case "region":
-          await handleRegion(actionCtx, actor, null);
+          await handleRegion(actionCtx, chatId, actor, null);
           return;
         case "link":
         case "default":
@@ -1708,6 +1974,42 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
   });
 
+  bot.callbackQuery(/^selchat:/, async (ctx) => {
+    const parsed = parseChatSelectCallbackData(ctx.callbackQuery.data);
+    if (!parsed) {
+      await safeAnswerCallbackQuery(ctx, "Не понял выбор чата.");
+      return;
+    }
+
+    const actor = getActor(ctx);
+    if (!actor) {
+      await safeAnswerCallbackQuery(ctx, "Не удалось определить отправителя.");
+      return;
+    }
+
+    if (actor.id !== parsed.ownerId) {
+      await safeAnswerCallbackQuery(ctx, "Это выбор другого пользователя. Отправь /chat");
+      return;
+    }
+
+    await repository.setDmChatSelection(actor.id, parsed.chatId);
+
+    const known = await repository.listKnownChats();
+    const chosen = known.find((chat) => chat.chatId === parsed.chatId);
+    const title = chosen ? formatChatTitle(chosen) : `Чат ${parsed.chatId}`;
+
+    await safeAnswerCallbackQuery(ctx, `Выбран чат: ${title}`);
+
+    // Обновляем текст, но сохраняем кнопки: можно сразу переключиться на другой чат.
+    try {
+      await ctx.editMessageText(`Активный чат: ${title}\n\nМожно переключиться кнопкой ниже или открыть /menu.`, {
+        reply_markup: ctx.callbackQuery.message?.reply_markup
+      });
+    } catch {
+      // Сообщение могло устареть или не поддерживать редактирование — тост уже показан.
+    }
+  });
+
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text.trim();
 
@@ -1715,7 +2017,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    if (!ensureGroup(ctx.chat.type)) {
+    if (!isSupportedChat(ctx.chat.type)) {
       return;
     }
 
@@ -1737,18 +2039,23 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     await repository.clearPendingAction(ctx.chat.id, actor.id);
 
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
+      return;
+    }
+
     switch (pending.action) {
       case "link":
-        await handleLink(ctx, actor, text);
+        await handleLink(ctx, chatId, actor, text);
         return;
       case "summary_psn":
-        await handleSummary(ctx, actor, text);
+        await handleSummary(ctx, chatId, actor, text);
         return;
       case "default":
-        await handleDefault(ctx, actor, text);
+        await handleDefault(ctx, chatId, actor, text);
         return;
       case "unlink":
-        await handleUnlink(ctx, actor, text);
+        await handleUnlink(ctx, chatId, actor, text);
         return;
     }
   });

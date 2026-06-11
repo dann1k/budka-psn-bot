@@ -5,6 +5,18 @@ export type PendingTelegramAction = "link" | "summary_psn" | "default" | "unlink
 
 export type ResponseMode = "image" | "text";
 
+export type KnownChat = {
+  chatId: number;
+  title: string | null;
+  type: string;
+};
+
+type TelegramChatRow = {
+  chat_id: number | string;
+  title: string | null;
+  type: string;
+};
+
 type LinkedAccountRow = {
   chat_id: number | string;
   user_id: number | string;
@@ -331,5 +343,84 @@ export class LinkRepository {
       );
 
     assertNoError(error, "Не получилось сохранить режим ответов чата");
+  }
+
+  async rememberChat(input: { chatId: number; title: string | null; type: string }): Promise<void> {
+    const { error } = await this.supabase
+      .from("telegram_chats")
+      .upsert(
+        {
+          chat_id: input.chatId,
+          title: input.title,
+          type: input.type,
+          last_seen_at: new Date().toISOString()
+        },
+        {
+          onConflict: "chat_id"
+        }
+      );
+
+    assertNoError(error, "Не получилось сохранить чат");
+  }
+
+  async listKnownChats(): Promise<KnownChat[]> {
+    const { data, error } = await this.supabase
+      .from("telegram_chats")
+      .select("chat_id,title,type")
+      .order("last_seen_at", { ascending: false });
+
+    assertNoError(error, "Не получилось получить список чатов");
+
+    return ((data ?? []) as TelegramChatRow[]).map((row) => ({
+      chatId: Number(row.chat_id),
+      title: row.title,
+      type: row.type
+    }));
+  }
+
+  async listUserChatIds(userId: number): Promise<number[]> {
+    const { data, error } = await this.supabase
+      .from("linked_accounts")
+      .select("chat_id")
+      .eq("user_id", userId);
+
+    assertNoError(error, "Не получилось получить чаты пользователя");
+
+    const chatIds = new Set<number>();
+    for (const row of (data ?? []) as Array<{ chat_id: number | string }>) {
+      chatIds.add(Number(row.chat_id));
+    }
+
+    return [...chatIds];
+  }
+
+  async getDmChatSelection(userId: number): Promise<number | null> {
+    const { data, error } = await this.supabase
+      .from("dm_chat_selections")
+      .select("chat_id")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    assertNoError(error, "Не получилось получить выбранный чат");
+
+    const row = data as { chat_id: number | string } | null;
+    return row ? Number(row.chat_id) : null;
+  }
+
+  async setDmChatSelection(userId: number, chatId: number): Promise<void> {
+    const { error } = await this.supabase
+      .from("dm_chat_selections")
+      .upsert(
+        {
+          user_id: userId,
+          chat_id: chatId,
+          selected_at: new Date().toISOString()
+        },
+        {
+          onConflict: "user_id"
+        }
+      );
+
+    assertNoError(error, "Не получилось сохранить выбранный чат");
   }
 }
