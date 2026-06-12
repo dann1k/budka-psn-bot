@@ -118,14 +118,14 @@ function accountLabelHtml(account: AccountLabel, emojis: EmojiConfig): string {
 
 // --- Высокоуровневые строители ответов ---------------------------------------
 
-// Каждый игрок — блок-абзац из двух строк (через <br>): ранг + имя + уровень, под
-// ним все четыре трофея. Списком, а не таблицей — переносится и влезает на телефоне.
+// Каждый игрок — карточка-blockquote из двух строк (через <br>): ранг + имя +
+// уровень, под ним все четыре трофея. Карточками, а не таблицей — влезает на телефоне.
 export function buildLeaderboardHtml(players: AggregatedPlayer[], emojis: EmojiConfig): string {
   const items = players
     .map(
       (player, index) =>
-        `<p>${rankLabel(index)} <b>${escapeHtml(player.user.displayName)}</b> · ур. ${player.level}` +
-        `<br>${trophyLine(player.trophies, emojis)}</p>`
+        `<blockquote>${rankLabel(index)} <b>${escapeHtml(player.user.displayName)}</b> · ур. ${player.level}` +
+        `<br>${trophyLine(player.trophies, emojis)}</blockquote>`
     )
     .join("");
 
@@ -137,8 +137,8 @@ export function buildPopularHtml(games: PopularGameAccumulator[]): string {
     .map((game, index) => {
       const players = [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"));
       return (
-        `<p>${index + 1}. <b>${escapeHtml(game.name)}</b> · ${game.players.size}` +
-        `<br>${joinPlayers(players)}</p>`
+        `<blockquote>${index + 1}. <b>${escapeHtml(game.name)}</b> · ${game.players.size}` +
+        `<br>${joinPlayers(players)}</blockquote>`
       );
     })
     .join("");
@@ -163,10 +163,15 @@ export function buildSummaryHtml(
   const blocks: string[] = [];
 
   if (input.avatarUrl) {
-    blocks.push(`<img src="${escapeHtml(input.avatarUrl)}"/>`);
+    // Эксперимент: оборачиваем аватар в <figure> с подписью-именем — вдруг iOS
+    // отрендерит картинку по центру (у image-блоков нет управления выравниванием).
+    // Имя уходит в подпись, отдельный <h3> при наличии аватара не дублируем.
+    blocks.push(
+      `<figure><img src="${escapeHtml(input.avatarUrl)}"/><figcaption><b>${escapeHtml(input.title)}</b></figcaption></figure>`
+    );
+  } else {
+    blocks.push(`<h3>${escapeHtml(input.title)}</h3>`);
   }
-
-  blocks.push(`<h3>${escapeHtml(input.title)}</h3>`);
 
   const identity = [
     customEmoji(statusToken(account.status, emojis)),
@@ -188,11 +193,16 @@ export function buildSummaryHtml(
   blocks.push(`<p>${escapeHtml(summary.level(input.level, input.progress))}</p>`);
   blocks.push(`<p>${trophyLine(input.trophies, emojis)}</p>`);
 
+  // Игры — маркированный список <ul>: каждая на своей строке, аккуратнее запятых.
   const gameNames = account.currentGames?.length ? account.currentGames : account.recentGames ?? [];
-  const gamesLine = isPlaying
-    ? summary.recent(account.recentGames?.length ? account.recentGames.join(", ") : summary.noGames)
-    : summary.games(gameNames.length > 0 ? gameNames.join(", ") : summary.noGames);
-  blocks.push(`<p>${escapeHtml(gamesLine)}</p>`);
+  const gamesList = isPlaying ? account.recentGames ?? [] : gameNames;
+  const gamesLabel = isPlaying ? summary.recentLabel : summary.gamesLabel;
+  if (gamesList.length > 0) {
+    blocks.push(`<p><b>${escapeHtml(gamesLabel)}</b></p>`);
+    blocks.push(`<ul>${gamesList.map((game) => `<li>${escapeHtml(game)}</li>`).join("")}</ul>`);
+  } else {
+    blocks.push(`<p><b>${escapeHtml(gamesLabel)}:</b> ${escapeHtml(summary.noGames)}</p>`);
+  }
 
   if (input.otherAccounts.length > 0) {
     const list = input.otherAccounts.map((acc) => accountLabelHtml(acc, emojis)).join(", ");
@@ -220,8 +230,8 @@ export function buildPlatinumHtml(groups: PlatinumGroup[], label: string): strin
     return [heading];
   }
 
-  // Каждая платина — блок-абзац: 🏆 название, под ним «платформа · дата». Длинный
-  // список режем на части под лимит блоков/символов (heading — только в первой).
+  // Каждая платина — карточка-blockquote: 🏆 название, под ним «платформа · дата».
+  // Длинный список режем на части под лимит блоков/символов (heading — только в первой).
   const CHUNK_ITEMS = 400;
   const chunks: string[] = [];
   for (let start = 0; start < groups.length; start += CHUNK_ITEMS) {
@@ -232,7 +242,7 @@ export function buildPlatinumHtml(groups: PlatinumGroup[], label: string): strin
         const meta = [escapeHtml(group.platform), earliest ? escapeHtml(formatDate(earliest)) : ""]
           .filter(Boolean)
           .join(" · ");
-        return `<p>🏆 <b>${escapeHtml(group.titleName)}</b><br>${meta}</p>`;
+        return `<blockquote>🏆 <b>${escapeHtml(group.titleName)}</b><br>${meta}</blockquote>`;
       })
       .join("");
     chunks.push(start === 0 ? heading + items : items);

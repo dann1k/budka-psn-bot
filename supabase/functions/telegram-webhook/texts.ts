@@ -204,8 +204,8 @@ export const texts = {
       lastOnlineLabel: "Был в сети",
       lastOnlineUnknown: "неизвестно",
       level: (level: number, progress: number) => `Уровень ${level} · ${progress}%`,
-      games: (games: string) => `Игры: ${games}`,
-      recent: (games: string) => `Последние игры: ${games}`,
+      gamesLabel: "🎮 Игры",
+      recentLabel: "🎮 Последние игры",
       noGames: "нет данных",
       otherAccounts: (count: number) => `Доп. аккаунты (${count})`
     },
