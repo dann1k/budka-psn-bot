@@ -964,7 +964,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
             try {
               await sendRich(
                 bot.api,
-                chatId,
+                ctx.chat.id,
                 buildSummaryHtml(
                   {
                     title: texts.summary.directPsnDisplayName,
@@ -1078,7 +1078,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           try {
             await sendRich(
               bot.api,
-              chatId,
+              ctx.chat.id,
               buildSummaryHtml(
                 {
                   title: formatTelegramName(targetUser),
@@ -1252,7 +1252,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         try {
           const chunks = buildPlatinumHtml(sortedGroups, formatTelegramLabel(targetUser));
           for (const [index, html] of chunks.entries()) {
-            await sendRich(bot.api, chatId, html, {
+            await sendRich(bot.api, ctx.chat.id, html, {
               replyToMessageId: index === 0 ? ctx.msg?.message_id : undefined
             });
           }
@@ -1545,7 +1545,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
     if (!isDebug) {
       try {
-        await sendRich(bot.api, chatId, buildPopularHtml(topGames), {
+        await sendRich(bot.api, ctx.chat.id, buildPopularHtml(topGames), {
           replyToMessageId: ctx.msg?.message_id
         });
         return;
@@ -1650,7 +1650,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const responseMode = await repository.getResponseMode(chatId);
       if (responseMode === "text") {
         try {
-          await sendRich(bot.api, chatId, buildLeaderboardHtml(sorted, config.emojis), {
+          await sendRich(bot.api, ctx.chat.id, buildLeaderboardHtml(sorted, config.emojis), {
             replyToMessageId: ctx.msg?.message_id
           });
           return;
