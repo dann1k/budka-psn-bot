@@ -20,6 +20,13 @@ import {
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
 import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
 import { texts } from "./texts.ts";
+import {
+  buildLeaderboardHtml,
+  buildPopularHtml,
+  buildSummaryHtml,
+  buildPlatinumHtml,
+  sendRich
+} from "./rich.ts";
 
 type BotConfig = {
   botToken: string;
@@ -46,7 +53,7 @@ type PreferredAccount = {
   index: number;
 };
 
-type PopularGameAccumulator = {
+export type PopularGameAccumulator = {
   key: string;
   name: string;
   imageUrl: string | null;
@@ -953,6 +960,41 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const summary = await psnService.getSummaryByOnlineId(targetArg);
 
         if (responseMode === "text") {
+          if (!clearInputHint) {
+            try {
+              await sendRich(
+                bot.api,
+                chatId,
+                buildSummaryHtml(
+                  {
+                    title: texts.summary.directPsnDisplayName,
+                    avatarUrl: summary.avatarUrl,
+                    primaryAccount: {
+                      onlineId: summary.onlineId,
+                      regionCode: summary.region?.code,
+                      hasPlus: summary.hasPlus,
+                      status: summary.presence.status,
+                      lastOnline: summary.presence.lastOnline,
+                      currentGames: summary.presence.currentGames,
+                      recentGames: summary.recentGames
+                    },
+                    otherAccounts: [],
+                    level: summary.level,
+                    progress: summary.progress,
+                    trophies: summary.trophies
+                  },
+                  config.emojis
+                ),
+                { replyToMessageId: ctx.msg?.message_id }
+              );
+              return;
+            } catch (error) {
+              console.warn(
+                `[summary] rich send failed, fallback to entities: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+
           const summaryMessage = formatSummary(
             {
               primaryAccount: {
@@ -1032,6 +1074,33 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       const preferred = pickPreferredAccount(aggregated);
 
       if (responseMode === "text") {
+        if (!clearInputHint) {
+          try {
+            await sendRich(
+              bot.api,
+              chatId,
+              buildSummaryHtml(
+                {
+                  title: formatTelegramName(targetUser),
+                  avatarUrl: preferred.summary.avatarUrl,
+                  primaryAccount: aggregated.accounts[preferred.index],
+                  otherAccounts: aggregated.accounts.filter((_, index) => index !== preferred.index),
+                  level: aggregated.level,
+                  progress: aggregated.progress,
+                  trophies: aggregated.trophies
+                },
+                config.emojis
+              ),
+              { replyToMessageId: ctx.msg?.message_id }
+            );
+            return;
+          } catch (error) {
+            console.warn(
+              `[summary] rich send failed, fallback to entities: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+
         const summaryMessage = formatSummary(
           {
             primaryAccount: aggregated.accounts[preferred.index],
@@ -1177,6 +1246,23 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         const bDate = Math.max(...b.occurrences.map((occurrence) => Date.parse(occurrence.earnedAt) || 0));
         return bDate - aDate;
       });
+
+      const responseMode = await repository.getResponseMode(chatId);
+      if (responseMode === "text") {
+        try {
+          const chunks = buildPlatinumHtml(sortedGroups, formatTelegramLabel(targetUser));
+          for (const [index, html] of chunks.entries()) {
+            await sendRich(bot.api, chatId, html, {
+              replyToMessageId: index === 0 ? ctx.msg?.message_id : undefined
+            });
+          }
+          return;
+        } catch (error) {
+          console.warn(
+            `[plats] rich send failed, fallback to entities: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
 
       const messages = chunkRichMessages([
         {
@@ -1457,6 +1543,19 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       }
     }
 
+    if (!isDebug) {
+      try {
+        await sendRich(bot.api, chatId, buildPopularHtml(topGames), {
+          replyToMessageId: ctx.msg?.message_id
+        });
+        return;
+      } catch (error) {
+        console.warn(
+          `[popular] rich send failed, fallback to entities: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     const messages = chunkRichMessages([
       { text: texts.popular.header, entities: [] },
       ...topGames.map((game, index) => formatPopularGameRow(game, index)),
@@ -1550,6 +1649,17 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
       const responseMode = await repository.getResponseMode(chatId);
       if (responseMode === "text") {
+        try {
+          await sendRich(bot.api, chatId, buildLeaderboardHtml(sorted, config.emojis), {
+            replyToMessageId: ctx.msg?.message_id
+          });
+          return;
+        } catch (error) {
+          console.warn(
+            `[table] rich send failed, fallback to entities: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
         const rows = sorted.map((player) =>
           formatLeaderboardRow(
             {

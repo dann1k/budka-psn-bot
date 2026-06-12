@@ -38,7 +38,7 @@ export const texts = {
       unlink: "Пришли ник в PSN для удаления или /cancel, если передумал."
     } as Record<PendingTelegramAction, string>,
     footer: "Отмена: /cancel",
-    summaryWho: (mention: string) => `${mention}, чья сводка?`,
+    summaryWho: (mention: string) => `${mention}, кого ищем?`,
     summaryPlaceholder: "Введите ник @Telegram или ник PSN",
     cancelled: "Ок, отменил ожидаемое действие.",
     expired: "Ожидаемое действие истекло. Открой /menu и попробуй ещё раз.",
@@ -182,10 +182,39 @@ export const texts = {
     loading: "Пожалуйста, подождите"
   },
 
-  // /switch_mode — переключение картинка/текст.
+  // /switch_mode — переключение картинка/rich. Бывший «текстовый» режим теперь
+  // отдаёт Rich Messages (Bot API 10.1): таблицы, заголовки, свёрнутые блоки.
   switchMode: {
-    text: "Режим ответов: 📝 текст. Сводка, таблица и популярные теперь приходят текстом.",
+    text: "Режим ответов: ✨ rich-формат. Сводка, таблица, популярные и платины приходят таблицами и заголовками (нужен свежий Telegram).",
     image: "Режим ответов: 🖼 картинка. Сводка, таблица и популярные снова приходят картинками."
+  },
+
+  // Тексты Rich-режима (Bot API 10.1, рендерятся в rich.ts): заголовки секций,
+  // подписи колонок таблиц и строки сводки. Динамические части (ники, имена игр)
+  // эскейпятся в rich.ts перед подстановкой в HTML, здесь — только формулировки.
+  rich: {
+    leaderboard: {
+      title: (count: number) => `🏆 Таблица группы · ${count}`,
+      cols: { rank: "#", player: "Игрок", level: "Ур.", trophies: "Трофеи" }
+    },
+    popular: {
+      title: "🎮 Популярные игры чата",
+      cols: { rank: "#", game: "Игра", players: "Кто играет" }
+    },
+    summary: {
+      playing: (games: string) => `Сейчас играет: ${games}`,
+      lastOnlineLabel: "Был в сети",
+      lastOnlineUnknown: "неизвестно",
+      level: (level: number, progress: number) => `Уровень ${level} · ${progress}%`,
+      games: (games: string) => `Игры: ${games}`,
+      recent: (games: string) => `Последние игры: ${games}`,
+      noGames: "нет данных",
+      otherAccounts: (count: number) => `Доп. аккаунты (${count})`
+    },
+    platinum: {
+      title: (label: string, count: number) => `🏆 Платины ${label} · ${count}`,
+      cols: { game: "Игра", platform: "Платформа", earned: "Получена" }
+    }
   },
 
   // /help и /start. Часть строк показывается только в личке (inPrivate).
@@ -212,7 +241,7 @@ export const texts = {
       "/plats [@telegram] — список платин игрока по всем аккаунтам",
       "/popular — топ-5 игр по числу участников чата",
       "/popular debug [game] — причины пропусков и поиск игровых бакетов",
-      "/switch_mode — переключить ответы бота между картинкой и текстом",
+      "/switch_mode — переключить ответы бота между картинкой и rich-форматом (таблицы)",
       "/unlink [online-id] — удалить один аккаунт или все свои привязки",
       "/cancel — отменить ввод PSN ID после кнопки меню",
       "/help — показать эту справку"
