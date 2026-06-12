@@ -189,17 +189,15 @@ export const texts = {
     image: "Режим ответов: 🖼 картинка. Сводка, таблица и популярные снова приходят картинками."
   },
 
-  // Тексты Rich-режима (Bot API 10.1, рендерятся в rich.ts): заголовки секций,
-  // подписи колонок таблиц и строки сводки. Динамические части (ники, имена игр)
-  // эскейпятся в rich.ts перед подстановкой в HTML, здесь — только формулировки.
+  // Тексты Rich-режима (Bot API 10.1, рендерятся в rich.ts): заголовки секций и
+  // строки сводки. Ответы — списки (блок-абзацы), а не таблицы, чтобы влезать на
+  // мобильном. Динамика (ники, имена игр) эскейпится в rich.ts; здесь — формулировки.
   rich: {
     leaderboard: {
-      title: (count: number) => `🏆 Таблица группы · ${count}`,
-      cols: { rank: "#", player: "Игрок", level: "Ур.", trophies: "Трофеи" }
+      title: (count: number) => `🏆 Таблица группы · ${count}`
     },
     popular: {
-      title: "🎮 Популярные игры чата",
-      cols: { rank: "#", game: "Игра", players: "Кто играет" }
+      title: "🎮 Популярные игры чата"
     },
     summary: {
       playing: (games: string) => `Сейчас играет: ${games}`,
@@ -212,8 +210,7 @@ export const texts = {
       otherAccounts: (count: number) => `Доп. аккаунты (${count})`
     },
     platinum: {
-      title: (label: string, count: number) => `🏆 Платины ${label} · ${count}`,
-      cols: { game: "Игра", platform: "Платформа", earned: "Получена" }
+      title: (label: string, count: number) => `🏆 Платины ${label} · ${count}`
     }
   },
 

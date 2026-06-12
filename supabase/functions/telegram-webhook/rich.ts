@@ -19,9 +19,13 @@ import type { EmojiConfig, EmojiToken } from "./types.ts";
 import type { AggregatedPlayer, PopularGameAccumulator } from "./bot.ts";
 
 type TrophyCounts = { platinum: number; gold: number; silver: number; bronze: number };
-type Align = "left" | "center" | "right";
 
 const MEDALS = ["🥇", "🥈", "🥉"];
+
+// Ранг в списке: медаль для топ-3, иначе «N.».
+function rankLabel(index: number): string {
+  return index < 3 ? MEDALS[index] : `${index + 1}.`;
+}
 
 // --- Низкоуровневые помощники -------------------------------------------------
 
@@ -41,24 +45,6 @@ export function customEmoji(token: EmojiToken): string {
   }
 
   return `<tg-emoji emoji-id="${token.id}">${token.value}</tg-emoji>`;
-}
-
-// Ячейки уже содержат готовый HTML (вызывающий обязан сам эскейпить динамику и
-// прогонять эмодзи через customEmoji). Заголовки — статические подписи из texts.
-function richTable(headers: string[], aligns: Align[], rows: string[][]): string {
-  const head = headers
-    .map((header, index) => `<th align="${aligns[index] ?? "left"}">${header}</th>`)
-    .join("");
-  const body = rows
-    .map(
-      (row) =>
-        `<tr>${row
-          .map((cell, index) => `<td align="${aligns[index] ?? "left"}">${cell}</td>`)
-          .join("")}</tr>`
-    )
-    .join("");
-
-  return `<table><tr>${head}</tr>${body}</table>`;
 }
 
 function trophyLine(trophies: TrophyCounts, emojis: EmojiConfig): string {
@@ -132,40 +118,32 @@ function accountLabelHtml(account: AccountLabel, emojis: EmojiConfig): string {
 
 // --- Высокоуровневые строители ответов ---------------------------------------
 
+// Каждый игрок — блок-абзац из двух строк (через <br>): ранг + имя + уровень, под
+// ним все четыре трофея. Списком, а не таблицей — переносится и влезает на телефоне.
 export function buildLeaderboardHtml(players: AggregatedPlayer[], emojis: EmojiConfig): string {
-  const cols = texts.rich.leaderboard.cols;
-  const rows = players.map((player, index) => [
-    index < 3 ? MEDALS[index] : String(index + 1),
-    escapeHtml(player.user.displayName),
-    `<b>${player.level}</b>`,
-    trophyLine(player.trophies, emojis)
-  ]);
-
-  return (
-    `<h3>${texts.rich.leaderboard.title(players.length)}</h3>` +
-    richTable(
-      [cols.rank, cols.player, cols.level, cols.trophies],
-      ["center", "left", "right", "left"],
-      rows
+  const items = players
+    .map(
+      (player, index) =>
+        `<p>${rankLabel(index)} <b>${escapeHtml(player.user.displayName)}</b> · ур. ${player.level}` +
+        `<br>${trophyLine(player.trophies, emojis)}</p>`
     )
-  );
+    .join("");
+
+  return `<h3>${texts.rich.leaderboard.title(players.length)}</h3>${items}`;
 }
 
 export function buildPopularHtml(games: PopularGameAccumulator[]): string {
-  const cols = texts.rich.popular.cols;
-  const rows = games.map((game, index) => {
-    const players = [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"));
-    return [
-      String(index + 1),
-      escapeHtml(game.name),
-      `${game.players.size} · ${joinPlayers(players)}`
-    ];
-  });
+  const items = games
+    .map((game, index) => {
+      const players = [...game.players.values()].sort((a, b) => a.localeCompare(b, "ru-RU"));
+      return (
+        `<p>${index + 1}. <b>${escapeHtml(game.name)}</b> · ${game.players.size}` +
+        `<br>${joinPlayers(players)}</p>`
+      );
+    })
+    .join("");
 
-  return (
-    `<h3>${texts.rich.popular.title}</h3>` +
-    richTable([cols.rank, cols.game, cols.players], ["center", "left", "left"], rows)
-  );
+  return `<h3>${texts.rich.popular.title}</h3>${items}`;
 }
 
 export function buildSummaryHtml(
@@ -236,29 +214,28 @@ export type PlatinumGroup = {
 // 32768 символов на сообщение), поэтому режем на части по CHUNK_ROWS — заголовок
 // только в первой. Возвращаем массив HTML-строк (по одной на сообщение).
 export function buildPlatinumHtml(groups: PlatinumGroup[], label: string): string[] {
-  const cols = texts.rich.platinum.cols;
-  const escapedLabel = escapeHtml(label);
-  const heading = `<h3>${texts.rich.platinum.title(escapedLabel, groups.length)}</h3>`;
+  const heading = `<h3>${texts.rich.platinum.title(escapeHtml(label), groups.length)}</h3>`;
 
   if (groups.length === 0) {
     return [heading];
   }
 
-  const CHUNK_ROWS = 400;
+  // Каждая платина — блок-абзац: 🏆 название, под ним «платформа · дата». Длинный
+  // список режем на части под лимит блоков/символов (heading — только в первой).
+  const CHUNK_ITEMS = 400;
   const chunks: string[] = [];
-  for (let start = 0; start < groups.length; start += CHUNK_ROWS) {
-    const rows = groups.slice(start, start + CHUNK_ROWS).map((group) => {
-      const earliest = [...group.occurrences]
-        .map((occurrence) => occurrence.earnedAt)
-        .sort()[0];
-      return [
-        escapeHtml(group.titleName),
-        escapeHtml(group.platform),
-        escapeHtml(earliest ? formatDate(earliest) : "")
-      ];
-    });
-    const table = richTable([cols.game, cols.platform, cols.earned], ["left", "left", "right"], rows);
-    chunks.push(start === 0 ? heading + table : table);
+  for (let start = 0; start < groups.length; start += CHUNK_ITEMS) {
+    const items = groups
+      .slice(start, start + CHUNK_ITEMS)
+      .map((group) => {
+        const earliest = [...group.occurrences].map((occurrence) => occurrence.earnedAt).sort()[0];
+        const meta = [escapeHtml(group.platform), earliest ? escapeHtml(formatDate(earliest)) : ""]
+          .filter(Boolean)
+          .join(" · ");
+        return `<p>🏆 <b>${escapeHtml(group.titleName)}</b><br>${meta}</p>`;
+      })
+      .join("");
+    chunks.push(start === 0 ? heading + items : items);
   }
 
   return chunks;
