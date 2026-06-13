@@ -129,7 +129,7 @@ export function buildLeaderboardHtml(players: AggregatedPlayer[], emojis: EmojiC
     )
     .join("");
 
-  return `<h3>${texts.rich.leaderboard.title(players.length)}</h3>${items}`;
+  return `<p><b>${texts.rich.leaderboard.title(players.length)}</b></p>${items}`;
 }
 
 export function buildPopularHtml(games: PopularGameAccumulator[]): string {
@@ -143,7 +143,7 @@ export function buildPopularHtml(games: PopularGameAccumulator[]): string {
     })
     .join("");
 
-  return `<h3>${texts.rich.popular.title}</h3>${items}`;
+  return `<p><b>${texts.rich.popular.title}</b></p>${items}`;
 }
 
 export function buildSummaryHtml(
@@ -165,12 +165,12 @@ export function buildSummaryHtml(
   if (input.avatarUrl) {
     // Эксперимент: оборачиваем аватар в <figure> с подписью-именем — вдруг iOS
     // отрендерит картинку по центру (у image-блоков нет управления выравниванием).
-    // Имя уходит в подпись, отдельный <h3> при наличии аватара не дублируем.
+    // Имя уходит в подпись, отдельный заголовок при наличии аватара не дублируем.
     blocks.push(
       `<figure><img src="${escapeHtml(input.avatarUrl)}"/><figcaption><b>${escapeHtml(input.title)}</b></figcaption></figure>`
     );
   } else {
-    blocks.push(`<h3>${escapeHtml(input.title)}</h3>`);
+    blocks.push(`<p><b>${escapeHtml(input.title)}</b></p>`);
   }
 
   const identity = [
@@ -224,7 +224,7 @@ export type PlatinumGroup = {
 // 32768 символов на сообщение), поэтому режем на части по CHUNK_ROWS — заголовок
 // только в первой. Возвращаем массив HTML-строк (по одной на сообщение).
 export function buildPlatinumHtml(groups: PlatinumGroup[], label: string): string[] {
-  const heading = `<h3>${texts.rich.platinum.title(escapeHtml(label), groups.length)}</h3>`;
+  const heading = `<p><b>${texts.rich.platinum.title(escapeHtml(label), groups.length)}</b></p>`;
 
   if (groups.length === 0) {
     return [heading];
