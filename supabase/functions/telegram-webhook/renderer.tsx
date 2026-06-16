@@ -1238,7 +1238,10 @@ export async function renderPlatinumCard(input: PlatinumCardInput, scaleMultipli
           )}
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
+        {/* Фиксированная ширина (а не flexGrow): иначе nowrap-текст с min-width:auto
+            распирает flex-блок за пределы карточки вместо обрезки многоточием.
+            76 (платина) + 22 + 72 (обложка) + 18 = 188; inner hero = 636 → текст 440 c запасом. */}
+        <div style={{ display: "flex", flexDirection: "column", width: "440px", overflow: "hidden" }}>
           <span style={{ fontSize: "11px", fontWeight: "700", color: LABEL, letterSpacing: "1.5px", marginBottom: "7px" }}>
             ПЛАТИНА ПОЛУЧЕНА
           </span>
@@ -1251,7 +1254,7 @@ export async function renderPlatinumCard(input: PlatinumCardInput, scaleMultipli
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
-              width: "100%",
+              width: "440px",
             }}
           >
             {input.gameName}
