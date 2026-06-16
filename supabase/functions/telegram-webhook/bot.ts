@@ -18,6 +18,7 @@ import {
   type PsnTrophyTitleGameSource
 } from "./psn.ts";
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
+import type { FeatureFlags } from "./features.ts";
 import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
 import { texts } from "./texts.ts";
 import {
@@ -31,6 +32,7 @@ import {
 type BotConfig = {
   botToken: string;
   emojis: EmojiConfig;
+  features: FeatureFlags;
 };
 
 export type AggregatedPlayer = {
@@ -249,6 +251,39 @@ async function safeAnswerCallbackQuery(ctx: Context, text?: string): Promise<voi
       `[menu] answerCallbackQuery skipped: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+// Удаляет сообщение, не роняя обработчик. В группе бот может стирать чужие
+// сообщения (например, команду /menu пользователя) только будучи админом с правом
+// «Удаление сообщений»; своё меню он удаляет всегда (до 48 часов после отправки).
+// Любая ошибка (нет прав / уже удалено / слишком старое) гасится в лог.
+async function safeDeleteMessage(ctx: Context, messageId: number | undefined): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (chatId === undefined || messageId === undefined) {
+    return;
+  }
+
+  try {
+    await ctx.api.deleteMessage(chatId, messageId);
+  } catch (error) {
+    console.warn(
+      `[menu] deleteMessage skipped id=${messageId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+// Тот же grammY-контекст, но с занулённым ctx.msg. Нужен, когда мы собираемся
+// удалить сообщение-меню после работы хендлера: иначе ответы хендлеров цитируют
+// его (reply_parameters = ctx.msg.message_id), и после удаления у каждого
+// результата остаётся шапка-цитата на удалённое сообщение. С msg === undefined
+// ответы уходят без цитаты. ctx.chat в grammY выводится из ctx.msg, поэтому его
+// переопределяем явно; остальное (api, reply, replyWithPhoto, from…) наследуется
+// через прототип и работает как обычно.
+function detachMenuMessage(ctx: Context): Context {
+  return Object.create(ctx, {
+    msg: { value: undefined, enumerable: true },
+    chat: { value: ctx.chat, enumerable: true }
+  }) as Context;
 }
 
 function formatTelegramLabel(user: Pick<LinkedUser, "username" | "displayName">): string {
@@ -809,22 +844,29 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     return actor;
   }
 
-  async function sendActionMenu(ctx: TelegramActionContext): Promise<void> {
+  async function sendActionMenu(ctx: TelegramActionContext): Promise<boolean> {
     const actor = await requireActor(ctx);
     if (!actor) {
-      return;
+      return false;
     }
 
     // Убеждаемся, что есть чат данных (в личке это может вывести выбор чата);
     // если нет — resolveCommandChat уже ответил пользователю, меню не показываем.
     const chatId = await resolveCommandChat(ctx);
     if (chatId === null) {
-      return;
+      return false;
     }
 
-    await replyToCommand(ctx, texts.menu.header, {
-      reply_markup: buildActionMenu(actor.id)
-    });
+    const extra = { reply_markup: buildActionMenu(actor.id) };
+    if (config.features.deleteMenuMessages) {
+      // Команду /menu сейчас удалим, поэтому меню шлём отдельным сообщением,
+      // а не ответом на неё — иначе осталась бы цитата на удалённое сообщение.
+      await ctx.reply(texts.menu.header, extra);
+    } else {
+      await replyToCommand(ctx, texts.menu.header, extra);
+    }
+
+    return true;
   }
 
   async function setPendingAction(
@@ -1793,7 +1835,13 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
   });
 
   bot.command("menu", async (ctx) => {
-    await sendActionMenu(ctx);
+    const shown = await sendActionMenu(ctx);
+    // Убираем за собой команду /menu, чтобы она не копилась в чате. Удаляем только
+    // если меню реально показано (иначе под удаление попал бы, например, запрос
+    // выбора чата в личке, который ещё нужен пользователю).
+    if (shown && config.features.deleteMenuMessages) {
+      await safeDeleteMessage(ctx, ctx.msg?.message_id);
+    }
   });
 
   bot.command("cancel", async (ctx) => {
@@ -2060,18 +2108,32 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       return;
     }
 
-    const actionCtx = ctx as unknown as TelegramActionContext;
+    // Удаляем сообщение-носитель только если это выделенное меню (/menu). Та же
+    // клавиатура прикреплена к справке /help и /start (см. sendHelp) — там клик по
+    // кнопке НЕ должен сносить весь текст справки. Различаем по тексту сообщения.
+    const isDedicatedMenu = ctx.callbackQuery.message?.text === texts.menu.header;
+    const deleteCarrier = config.features.deleteMenuMessages && isDedicatedMenu;
+    // ID меню (сообщение с инлайн-клавиатурой) для последующего удаления.
+    const menuMessageId = ctx.msg?.message_id;
+
+    // В режиме удаления отдаём хендлерам контекст с занулённым msg, чтобы их
+    // ответы не цитировали меню, которое мы удалим после их работы.
+    const actionCtx = (deleteCarrier
+      ? detachMenuMessage(ctx)
+      : ctx) as unknown as TelegramActionContext;
     const chatId = await resolveCommandChat(actionCtx);
     if (chatId === null) {
       return;
     }
 
     const loadingMessage = await ctx.reply(texts.menuCallback.loading, {
-      reply_parameters: ctx.msg
-        ? {
-            message_id: ctx.msg.message_id
-          }
-        : undefined
+      // В режиме удаления меню исчезнет — не цитируем его (иначе у «подождите»
+      // мелькнула бы цитата на удаляемое сообщение). В обычном режиме — как было.
+      reply_parameters: deleteCarrier
+        ? undefined
+        : ctx.msg
+          ? { message_id: ctx.msg.message_id }
+          : undefined
     });
     const loadingMessageId = loadingMessage.message_id;
 
@@ -2080,28 +2142,34 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       switch (callback.action) {
         case "summary":
           await handleSummary(actionCtx, chatId, actor, null);
-          return;
+          break;
         case "me":
           await handleMe(actionCtx, chatId, actor);
-          return;
+          break;
         case "table":
           await handleTable(actionCtx, chatId);
-          return;
+          break;
         case "popular":
           await handlePopular(actionCtx, chatId);
-          return;
+          break;
         case "plats":
           await handlePlats(actionCtx, chatId, actor, null);
-          return;
+          break;
         case "region":
           await handleRegion(actionCtx, chatId, actor, null);
-          return;
+          break;
         case "link":
         case "default":
         case "summary_psn":
         case "unlink":
           await setPendingAction(actionCtx, actor, callback.action);
-          return;
+          break;
+      }
+
+      // Дошли сюда — хендлер отработал без исключения. Только теперь убираем меню,
+      // чтобы при ошибке оно осталось и пользователь мог повторить выбор кнопки.
+      if (deleteCarrier) {
+        await safeDeleteMessage(ctx, menuMessageId);
       }
     } finally {
       console.log(

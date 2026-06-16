@@ -1,4 +1,5 @@
 import { emojis } from "./emojis.ts";
+import { type FeatureFlags, loadFeatureFlags } from "./features.ts";
 
 type AppConfig = {
   botToken: string;
@@ -8,6 +9,7 @@ type AppConfig = {
   supabaseSecretKey: string;
   psnAuthEncryptionKey: string;
   emojis: typeof emojis;
+  features: FeatureFlags;
 };
 
 function readRequired(name: string): string {
@@ -28,6 +30,7 @@ export function getConfig(): AppConfig {
     supabaseUrl: readRequired("SUPABASE_URL"),
     supabaseSecretKey: readRequired("BUDKA_PSN_SUPABASE_SECRET_KEY"),
     psnAuthEncryptionKey: readRequired("BUDKA_PSN_AUTH_ENCRYPTION_KEY"),
-    emojis
+    emojis,
+    features: loadFeatureFlags()
   };
 }
