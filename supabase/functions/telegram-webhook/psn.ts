@@ -63,6 +63,22 @@ export type PsnPlayedGame = {
   lastPlayedAt: string | null;
 };
 
+export type PsnPolledPlatinum = {
+  npCommunicationId: string;
+  npServiceName: string | null;
+  titleName: string;
+  platform: string | null;
+  iconUrl: string | null;
+  earnedAt: string | null;
+};
+
+export type PsnPlatinumPoll = {
+  accountId: string;
+  onlineId: string;
+  maxActivityAt: string | null;
+  platinums: PsnPolledPlatinum[];
+};
+
 export type PsnTrophyTitleGameSource = {
   requestedOnlineId: string;
   resolvedOnlineId: string;
@@ -560,6 +576,84 @@ export class PsnService {
       }
 
       return titles;
+    });
+  }
+
+  /**
+   * Лёгкий опрос для детектора платин: все тайтлы аккаунта с platinum > 0, с
+   * устойчивым ключом npCommunicationId. В отличие от getPlatinumTitlesByOnlineId
+   * НЕ тянет регион/shareable-link (для фонового поллинга это лишние вызовы).
+   * Если передан knownAccountId — пропускаем резолв профиля (accountId у PSN
+   * стабилен и не меняется даже при смене online id), так что в установившемся
+   * режиме это один вызов getUserTitles на аккаунт.
+   */
+  async getEarnedPlatinumsForPoll(
+    onlineId: string,
+    knownAccountId?: string | null
+  ): Promise<PsnPlatinumPoll> {
+    return await this.withAuthRetry(async (accessToken) => {
+      let accountId =
+        knownAccountId && knownAccountId.trim().length > 0 ? knownAccountId : null;
+      let resolvedOnlineId = onlineId;
+
+      if (!accountId) {
+        const profile = await this.getProfile(accessToken, onlineId);
+        accountId = profile.accountId;
+        resolvedOnlineId = profile.onlineId ?? onlineId;
+      }
+
+      const byId = new Map<string, PsnPolledPlatinum>();
+      let maxActivityAt: string | null = null;
+      let offset = 0;
+
+      while (true) {
+        const page = normalizeUserTitlesPage(
+          await psnApi.getUserTitles({ accessToken }, accountId, { limit: 800, offset }),
+          resolvedOnlineId
+        );
+
+        for (const title of page.trophyTitles) {
+          const updatedAt = title.lastUpdatedDateTime || null;
+          if (updatedAt && (!maxActivityAt || updatedAt > maxActivityAt)) {
+            maxActivityAt = updatedAt;
+          }
+
+          if (normalizeTrophies(title.earnedTrophies).platinum <= 0) {
+            continue;
+          }
+
+          const npCommunicationId = title.npCommunicationId;
+          if (!npCommunicationId || byId.has(npCommunicationId)) {
+            continue;
+          }
+
+          byId.set(npCommunicationId, {
+            npCommunicationId,
+            npServiceName: title.npServiceName ?? null,
+            titleName: title.trophyTitleName ?? "Unknown title",
+            platform: title.trophyTitlePlatform ?? null,
+            iconUrl: title.trophyTitleIconUrl ?? null,
+            earnedAt: updatedAt
+          });
+        }
+
+        if (
+          page.nextOffset === undefined ||
+          page.nextOffset <= offset ||
+          page.trophyTitles.length === 0
+        ) {
+          break;
+        }
+
+        offset = page.nextOffset;
+      }
+
+      return {
+        accountId: accountId as string,
+        onlineId: resolvedOnlineId,
+        maxActivityAt,
+        platinums: [...byId.values()]
+      };
     });
   }
 

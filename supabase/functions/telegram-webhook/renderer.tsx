@@ -1099,3 +1099,181 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
   );
   return png;
 }
+
+export type PlatinumCardInput = {
+  onlineId: string;
+  displayName: string;
+  username: string | null;
+  avatarUrl: string | null;
+  hasPlus: boolean;
+  regionCode: string | null;
+  gameName: string;
+  gameIconUrl: string | null;
+  platform: string | null;
+};
+
+// «НОВАЯ ПЛАТИНА» — фиксированная карточка-фанфара для авто-анонса: аватар игрока +
+// крупная платина + иконка/название игры. Тот же дизайн-язык, что у summary.
+export async function renderPlatinumCard(input: PlatinumCardInput, scaleMultiplier = 1): Promise<Uint8Array> {
+  await initRenderer();
+  if (input.hasPlus) {
+    await preloadPlayStationPlusImage();
+  }
+
+  const [avatarBase64, gameBase64] = await Promise.all([
+    fetchImageBase64(input.avatarUrl),
+    fetchImageBase64(input.gameIconUrl),
+  ]);
+
+  const ownerLabel = input.username ? `@${input.username}` : input.displayName;
+
+  const EYEBROW_H = 20;
+  const EYEBROW_MB = 18;
+  const HEADER_H = 72;
+  const HEADER_MB = 20;
+  const HERO_H = 132;
+  const cardInnerHeight = EYEBROW_H + EYEBROW_MB + HEADER_H + HEADER_MB + HERO_H;
+  const cardHeight = cardInnerHeight + CARD_PAD * 2 + OUTER_PAD * 2;
+
+  const cardHtml = (
+    <CardFrame height={cardHeight}>
+      {/* Eyebrow */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%", height: `${EYEBROW_H}px`, marginBottom: `${EYEBROW_MB}px` }}>
+        <span style={{ fontSize: "12px", fontWeight: "800", letterSpacing: "3px", color: BLUE }}>
+          НОВАЯ ПЛАТИНА · БУДКА
+        </span>
+      </div>
+
+      {/* Player header */}
+      <div style={{ display: "flex", alignItems: "center", width: "100%", height: `${HEADER_H}px`, marginBottom: `${HEADER_MB}px` }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "72px",
+            height: "72px",
+            borderRadius: "50%",
+            overflow: "hidden",
+            marginRight: "16px",
+            boxShadow: "0 6px 16px rgba(0,112,209,0.35)",
+          }}
+        >
+          {avatarBase64 ? (
+            <img src={avatarBase64} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          ) : (
+            <AvatarPlaceholder label={input.onlineId} fontSize={30} />
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", flexGrow: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: "4px" }}>
+            <span style={{ fontSize: "24px", fontWeight: "800", color: INK, letterSpacing: "-0.5px", marginRight: "9px" }}>
+              {input.onlineId}
+            </span>
+            {input.hasPlus && (
+              <div style={{ display: "flex", marginRight: "9px" }}>
+                <PlusIcon size={20} />
+              </div>
+            )}
+            {input.regionCode && (
+              <span
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "2px 8px",
+                  borderRadius: "6px",
+                  backgroundColor: CHIP_BG,
+                  color: BLUE,
+                  fontSize: "12px",
+                  fontWeight: "700",
+                }}
+              >
+                {input.regionCode.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <span style={{ fontSize: "15px", color: MUTED, fontWeight: "600" }}>
+            {ownerLabel}
+          </span>
+        </div>
+      </div>
+
+      {/* Hero: platinum + game */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          width: "100%",
+          height: `${HERO_H}px`,
+          backgroundColor: LEVEL_BG,
+          border: `1px solid ${LEVEL_BORDER}`,
+          borderRadius: "16px",
+          padding: "0 24px",
+          boxSizing: "border-box",
+        }}
+      >
+        <TrophyIcon type="platinum" size={76} />
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "72px",
+            height: "72px",
+            borderRadius: "12px",
+            backgroundColor: COVER_BG,
+            overflow: "hidden",
+            marginLeft: "22px",
+            marginRight: "18px",
+          }}
+        >
+          {gameBase64 ? (
+            <img src={gameBase64} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          ) : (
+            <span style={{ fontSize: "13px", fontWeight: "700", color: COVER_TEXT, fontFamily: FONT_MONO }}>
+              {gameAbbr(input.gameName)}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
+          <span style={{ fontSize: "11px", fontWeight: "700", color: LABEL, letterSpacing: "1.5px", marginBottom: "7px" }}>
+            ПЛАТИНА ПОЛУЧЕНА
+          </span>
+          <span
+            style={{
+              fontSize: "23px",
+              fontWeight: "800",
+              color: INK,
+              letterSpacing: "-0.3px",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              width: "100%",
+            }}
+          >
+            {input.gameName}
+          </span>
+          {input.platform && (
+            <span style={{ fontSize: "14px", color: BLUE, fontWeight: "700", marginTop: "5px" }}>
+              {input.platform}
+            </span>
+          )}
+        </div>
+      </div>
+    </CardFrame>
+  );
+
+  const svg = await satori(cardHtml, {
+    width: CARD_LOGICAL_WIDTH,
+    height: cardHeight,
+    fonts: getFontConfig(),
+  });
+
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, cardHeight, SUMMARY_RENDER_SCALE, scaleMultiplier);
+  const png = rasterize(svg, outputWidth);
+  console.log(`[platinum-render] scale=${scaleMultiplier} outW=${outputWidth}`);
+  return png;
+}

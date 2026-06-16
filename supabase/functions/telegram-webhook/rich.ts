@@ -251,6 +251,22 @@ export function buildPlatinumHtml(groups: PlatinumGroup[], label: string): strin
   return chunks;
 }
 
+// Анонс одной новой платины (rich/text-режим). ownerLabel — @username или имя.
+export function buildPlatinumUnlockedHtml(
+  input: { ownerLabel: string; onlineId: string; titleName: string; platform: string | null },
+  emojis: EmojiConfig
+): string {
+  const platinum = customEmoji(emojis.trophies.platinum);
+  const meta = [escapeHtml(input.onlineId), input.platform ? escapeHtml(input.platform) : ""]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    `<p>${platinum} <b>${escapeHtml(input.ownerLabel)}</b> ${escapeHtml(texts.platinumWatch.richVerb)}</p>` +
+    `<blockquote>🏆 <b>${escapeHtml(input.titleName)}</b><br>${meta}</blockquote>`
+  );
+}
+
 // --- Транспорт ----------------------------------------------------------------
 
 type InputRichMessage = {

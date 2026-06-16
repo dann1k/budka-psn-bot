@@ -1769,6 +1769,32 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     );
   }
 
+  // /platinums [on|off] — включить/выключить авто-анонс новых платин в этом чате
+  // (без аргумента показывает текущий статус). Сам детектор работает фоном в
+  // self-hosted рантайме (platinum-watcher.ts); здесь — только per-chat opt-out.
+  async function handlePlatinumToggle(
+    ctx: TelegramActionContext,
+    chatId: number,
+    arg: string | null | undefined
+  ): Promise<void> {
+    const value = (arg ?? "").trim().toLowerCase();
+
+    if (value === "on" || value === "вкл") {
+      await repository.setPlatinumAnnounce(chatId, true);
+      await replyToCommand(ctx, texts.platinumWatch.toggleOn);
+      return;
+    }
+
+    if (value === "off" || value === "выкл") {
+      await repository.setPlatinumAnnounce(chatId, false);
+      await replyToCommand(ctx, texts.platinumWatch.toggleOff);
+      return;
+    }
+
+    const enabled = await repository.isPlatinumAnnounceEnabled(chatId);
+    await replyToCommand(ctx, texts.platinumWatch.toggleStatus(enabled));
+  }
+
   async function sendHelp(ctx: TelegramActionContext) {
     const actor = getActor(ctx);
     const inPrivate = isPrivateChat(ctx.chat.type);
@@ -2063,6 +2089,15 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
     }
 
     await handleSwitchMode(ctx, chatId);
+  });
+
+  bot.command("platinums", async (ctx) => {
+    const chatId = await resolveCommandChat(ctx);
+    if (chatId === null) {
+      return;
+    }
+
+    await handlePlatinumToggle(ctx, chatId, getCommandArg(ctx.message?.text));
   });
 
   bot.callbackQuery(/^menu:/, async (ctx) => {

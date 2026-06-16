@@ -11,6 +11,42 @@ export type KnownChat = {
   type: string;
 };
 
+export type LinkedPsnAccount = {
+  onlineId: string;
+  normalized: string;
+};
+
+export type PlatinumChatTarget = {
+  chatId: number;
+  userId: number;
+  username: string | null;
+  displayName: string;
+  psnOnlineId: string;
+};
+
+export type PlatinumWatchRow = {
+  normalized: string;
+  accountId: string | null;
+  baselinedAt: string | null;
+  lastPolledAt: string | null;
+  lastActivityAt: string | null;
+  consecutiveErrors: number;
+  disabledUntil: string | null;
+};
+
+export type SeenPlatinumInput = {
+  npCommunicationId: string;
+  npServiceName: string | null;
+  titleName: string;
+  platform: string | null;
+  iconUrl: string | null;
+  earnedAt: string | null;
+};
+
+export type PendingPlatinum = SeenPlatinumInput & {
+  normalized: string;
+};
+
 type TelegramChatRow = {
   chat_id: number | string;
   title: string | null;
@@ -428,5 +464,218 @@ export class LinkRepository {
       );
 
     assertNoError(error, "Не получилось сохранить выбранный чат");
+  }
+
+  // --- Детектор платин ---------------------------------------------------------
+
+  // Уникальные PSN-аккаунты (по нормализованному id) среди всех привязок —
+  // именно их обходит сторож. Один аккаунт в N чатах опрашивается один раз.
+  async listDistinctLinkedPsnAccounts(): Promise<LinkedPsnAccount[]> {
+    const { data, error } = await this.supabase
+      .from("linked_accounts")
+      .select("psn_online_id,psn_online_id_normalized");
+
+    assertNoError(error, "Не получилось получить список PSN-аккаунтов");
+
+    const byNormalized = new Map<string, string>();
+    for (const row of (data ?? []) as Array<{
+      psn_online_id: string;
+      psn_online_id_normalized: string;
+    }>) {
+      if (!byNormalized.has(row.psn_online_id_normalized)) {
+        byNormalized.set(row.psn_online_id_normalized, row.psn_online_id);
+      }
+    }
+
+    return [...byNormalized.entries()].map(([normalized, onlineId]) => ({ normalized, onlineId }));
+  }
+
+  // Куда постить анонс: все чаты, где аккаунт залинкан, + владелец (для подписи).
+  async listChatsForPsnAccount(normalized: string): Promise<PlatinumChatTarget[]> {
+    const { data, error } = await this.supabase
+      .from("linked_accounts")
+      .select("chat_id,user_id,username,display_name,psn_online_id")
+      .eq("psn_online_id_normalized", normalized);
+
+    assertNoError(error, "Не получилось получить чаты PSN-аккаунта");
+
+    return ((data ?? []) as LinkedAccountRow[]).map((row) => ({
+      chatId: Number(row.chat_id),
+      userId: Number(row.user_id),
+      username: row.username,
+      displayName: row.display_name,
+      psnOnlineId: row.psn_online_id
+    }));
+  }
+
+  async getPlatinumWatch(normalized: string): Promise<PlatinumWatchRow | null> {
+    const { data, error } = await this.supabase
+      .from("psn_platinum_watch")
+      .select(
+        "psn_online_id_normalized,account_id,baselined_at,last_polled_at,last_activity_at,consecutive_errors,disabled_until"
+      )
+      .eq("psn_online_id_normalized", normalized)
+      .maybeSingle();
+
+    assertNoError(error, "Не получилось получить состояние опроса платин");
+
+    if (!data) {
+      return null;
+    }
+
+    const row = data as {
+      psn_online_id_normalized: string;
+      account_id: string | null;
+      baselined_at: string | null;
+      last_polled_at: string | null;
+      last_activity_at: string | null;
+      consecutive_errors: number | null;
+      disabled_until: string | null;
+    };
+
+    return {
+      normalized: row.psn_online_id_normalized,
+      accountId: row.account_id,
+      baselinedAt: row.baselined_at,
+      lastPolledAt: row.last_polled_at,
+      lastActivityAt: row.last_activity_at,
+      consecutiveErrors: row.consecutive_errors ?? 0,
+      disabledUntil: row.disabled_until
+    };
+  }
+
+  async upsertPlatinumWatch(row: PlatinumWatchRow): Promise<void> {
+    const { error } = await this.supabase.from("psn_platinum_watch").upsert(
+      {
+        psn_online_id_normalized: row.normalized,
+        account_id: row.accountId,
+        baselined_at: row.baselinedAt,
+        last_polled_at: row.lastPolledAt,
+        last_activity_at: row.lastActivityAt,
+        consecutive_errors: row.consecutiveErrors,
+        disabled_until: row.disabledUntil
+      },
+      { onConflict: "psn_online_id_normalized" }
+    );
+
+    assertNoError(error, "Не получилось сохранить состояние опроса платин");
+  }
+
+  async getSeenPlatinumIds(normalized: string): Promise<Set<string>> {
+    const { data, error } = await this.supabase
+      .from("psn_platinum_seen")
+      .select("np_communication_id")
+      .eq("psn_online_id_normalized", normalized);
+
+    assertNoError(error, "Не получилось получить отмеченные платины");
+
+    const ids = new Set<string>();
+    for (const row of (data ?? []) as Array<{ np_communication_id: string }>) {
+      ids.add(row.np_communication_id);
+    }
+
+    return ids;
+  }
+
+  // announcedAt = now() при baseline (подавляем исторические), null — к отправке.
+  // ignoreDuplicates: повторная вставка существующей платины не трогает её
+  // announced_at (идемпотентность).
+  async insertSeenPlatinums(
+    normalized: string,
+    platinums: SeenPlatinumInput[],
+    announcedAt: string | null
+  ): Promise<void> {
+    if (platinums.length === 0) {
+      return;
+    }
+
+    const rows = platinums.map((platinum) => ({
+      psn_online_id_normalized: normalized,
+      np_communication_id: platinum.npCommunicationId,
+      np_service_name: platinum.npServiceName,
+      title_name: platinum.titleName,
+      platform: platinum.platform,
+      icon_url: platinum.iconUrl,
+      earned_at: platinum.earnedAt,
+      announced_at: announcedAt
+    }));
+
+    const { error } = await this.supabase
+      .from("psn_platinum_seen")
+      .upsert(rows, {
+        onConflict: "psn_online_id_normalized,np_communication_id",
+        ignoreDuplicates: true
+      });
+
+    assertNoError(error, "Не получилось сохранить платины");
+  }
+
+  async listPendingPlatinumAnnouncements(): Promise<PendingPlatinum[]> {
+    const { data, error } = await this.supabase
+      .from("psn_platinum_seen")
+      .select(
+        "psn_online_id_normalized,np_communication_id,np_service_name,title_name,platform,icon_url,earned_at"
+      )
+      .is("announced_at", null);
+
+    assertNoError(error, "Не получилось получить платины к анонсу");
+
+    return ((data ?? []) as Array<{
+      psn_online_id_normalized: string;
+      np_communication_id: string;
+      np_service_name: string | null;
+      title_name: string;
+      platform: string | null;
+      icon_url: string | null;
+      earned_at: string | null;
+    }>).map((row) => ({
+      normalized: row.psn_online_id_normalized,
+      npCommunicationId: row.np_communication_id,
+      npServiceName: row.np_service_name,
+      titleName: row.title_name,
+      platform: row.platform,
+      iconUrl: row.icon_url,
+      earnedAt: row.earned_at
+    }));
+  }
+
+  async markPlatinumsAnnounced(normalized: string, npCommunicationIds: string[]): Promise<void> {
+    if (npCommunicationIds.length === 0) {
+      return;
+    }
+
+    const { error } = await this.supabase
+      .from("psn_platinum_seen")
+      .update({ announced_at: new Date().toISOString() })
+      .eq("psn_online_id_normalized", normalized)
+      .in("np_communication_id", npCommunicationIds);
+
+    assertNoError(error, "Не получилось отметить платины анонсированными");
+  }
+
+  // Per-chat opt-out. По умолчанию (нет строки/нет колонки) — включено.
+  async isPlatinumAnnounceEnabled(chatId: number): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from("chat_settings")
+      .select("announce_platinums")
+      .eq("chat_id", chatId)
+      .maybeSingle();
+
+    assertNoError(error, "Не получилось получить настройку анонса платин");
+
+    return (data as { announce_platinums?: boolean | null } | null)?.announce_platinums !== false;
+  }
+
+  async setPlatinumAnnounce(chatId: number, enabled: boolean): Promise<void> {
+    const { error } = await this.supabase.from("chat_settings").upsert(
+      {
+        chat_id: chatId,
+        announce_platinums: enabled,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: "chat_id" }
+    );
+
+    assertNoError(error, "Не получилось сохранить настройку анонса платин");
   }
 }

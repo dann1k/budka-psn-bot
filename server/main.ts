@@ -11,12 +11,14 @@ import { getConfig } from "../supabase/functions/telegram-webhook/config.ts";
 import { PsnAuthStore } from "../supabase/functions/telegram-webhook/psn-auth-store.ts";
 import { PsnService } from "../supabase/functions/telegram-webhook/psn.ts";
 import { LinkRepository } from "../supabase/functions/telegram-webhook/repository.ts";
+import { PlatinumWatcher } from "../supabase/functions/telegram-webhook/platinum-watcher.ts";
 
 const config = getConfig();
 const repository = new LinkRepository(config.supabaseUrl, config.supabaseSecretKey);
 const psnAuthStore = new PsnAuthStore(config.supabaseUrl, config.supabaseSecretKey, config.psnAuthEncryptionKey);
 const psnService = new PsnService(config.psnNpsso, psnAuthStore);
 const bot = createBot(config, repository, psnService);
+const platinumWatcher = new PlatinumWatcher(bot.api, repository, psnService, config.emojis);
 
 // Proactively rotate the PSN refresh token so the bot survives indefinitely even
 // with zero user traffic (each rotation resets the ~60-day refresh lifetime, so a
@@ -52,6 +54,31 @@ console.log(`[budka] starting long-polling as @${bot.botInfo.username}`);
 // Rotate once on boot (don't block startup on it), then daily.
 void runKeepalive();
 setInterval(() => void runKeepalive(), KEEPALIVE_INTERVAL_MS);
+
+// Детектор новых платин (только self-hosted). Один процесс → обходы идут
+// последовательно под флагом, чтобы длинный sweep не наложился на следующий тик.
+// Первый обход на старте лишь засевает baseline (без спама историческими платинами).
+if (config.features.platinumWatcher.enabled) {
+  const sweepIntervalMs = config.features.platinumWatcher.pollMinutes * 60 * 1000;
+  let sweeping = false;
+  const runPlatinumSweep = async (): Promise<void> => {
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      await platinumWatcher.sweep();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[psn-platinum] sweep failed: ${message}`);
+    } finally {
+      sweeping = false;
+    }
+  };
+  void runPlatinumSweep();
+  setInterval(() => void runPlatinumSweep(), sweepIntervalMs);
+  console.log(`[psn-platinum] watcher enabled, every ${config.features.platinumWatcher.pollMinutes}m`);
+} else {
+  console.log("[psn-platinum] watcher disabled (features.platinumWatcher.enabled=false)");
+}
 
 // Resolves only after bot.stop() (graceful shutdown above).
 await bot.start({

@@ -132,6 +132,21 @@ export const texts = {
     failed: (reason: string) => `Не получилось получить платины: ${reason}`
   },
 
+  // Авто-анонс новых платин (фоновый сторож + команда /platinums on|off).
+  platinumWatch: {
+    caption: (owner: string, game: string) => `🏆 ${owner} выбил платину в ${game}!`,
+    richVerb: "выбил платину!",
+    plain: (owner: string, game: string, platform: string | null) =>
+      `🏆 ${owner} выбил платину!\n${game}${platform ? ` · ${platform}` : ""}`,
+    toggleOn:
+      "🏆 Анонс платин включён: напишу в этот чат, когда кто-то из привязанных выбьет платину.",
+    toggleOff: "Анонс платин выключен для этого чата. Включить обратно — /platinums on",
+    toggleStatus: (enabled: boolean) =>
+      enabled
+        ? "🏆 Анонс платин сейчас включён. Выключить — /platinums off"
+        : "Анонс платин сейчас выключен. Включить — /platinums on"
+  },
+
   // /table.
   table: {
     header: (count: number) => `Таблица группы по PSN (${count}):`,

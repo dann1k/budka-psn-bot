@@ -4,5 +4,9 @@
     "summary": 1,
     "table": 1,
     "popular": 1
+  },
+  "platinumWatcher": {
+    "enabled": true,
+    "pollMinutes": 20
   }
 }

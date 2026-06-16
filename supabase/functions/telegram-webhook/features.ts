@@ -15,6 +15,12 @@ export const RENDER_SCALE_MIN = 0.5;
 export const RENDER_SCALE_MAX = 2;
 const DEFAULT_RENDER_SCALE = 1;
 
+// Период обхода детектора платин: не чаще раза в 5 мин (рейт-лимиты PSN) и не реже
+// раза в 6 ч (иначе анонсы запаздывают слишком сильно). Дефолт — 20 мин.
+export const POLL_MINUTES_MIN = 5;
+export const POLL_MINUTES_MAX = 360;
+const DEFAULT_POLL_MINUTES = 20;
+
 export type RenderScaleFlags = {
   /** Сводка игрока (/summary, кнопка «Моя сводка») — renderGamerCard. */
   summary: number;
@@ -22,6 +28,13 @@ export type RenderScaleFlags = {
   table: number;
   /** Популярные игры (/popular) — renderPopularGames. */
   popular: number;
+};
+
+export type PlatinumWatcherFlags = {
+  /** Включён ли фоновый детектор платин (только self-hosted, server/main.ts). */
+  enabled: boolean;
+  /** Период обхода аккаунтов в минутах (зажимается в [POLL_MINUTES_MIN, MAX]). */
+  pollMinutes: number;
 };
 
 export type FeatureFlags = {
@@ -37,6 +50,12 @@ export type FeatureFlags = {
    * Прокидываются в renderer.tsx как scaleMultiplier.
    */
   renderScale: RenderScaleFlags;
+  /**
+   * Фоновый детектор новых платин: постит уведомление в чат(ы), когда
+   * привязанный игрок выбивает платину. Работает только в self-hosted рантайме
+   * (server/main.ts), не в Edge Functions. См. platinum-watcher.ts.
+   */
+  platinumWatcher: PlatinumWatcherFlags;
 };
 
 // Безопасные значения по умолчанию на случай, если ключ в JSON отсутствует или
@@ -48,6 +67,10 @@ const DEFAULTS: FeatureFlags = {
     summary: DEFAULT_RENDER_SCALE,
     table: DEFAULT_RENDER_SCALE,
     popular: DEFAULT_RENDER_SCALE
+  },
+  platinumWatcher: {
+    enabled: false,
+    pollMinutes: DEFAULT_POLL_MINUTES
   }
 };
 
@@ -61,12 +84,23 @@ function readRenderScale(value: unknown): number {
   return Math.min(RENDER_SCALE_MAX, Math.max(RENDER_SCALE_MIN, value));
 }
 
+// Зажимает период обхода в [POLL_MINUTES_MIN, POLL_MINUTES_MAX]; мусор → дефолт.
+function readPollMinutes(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_POLL_MINUTES;
+  }
+
+  return Math.min(POLL_MINUTES_MAX, Math.max(POLL_MINUTES_MIN, value));
+}
+
 export function loadFeatureFlags(): FeatureFlags {
   const raw = featuresJson as {
     deleteMenuMessages?: unknown;
     renderScale?: Record<string, unknown>;
+    platinumWatcher?: Record<string, unknown>;
   };
   const renderScale = raw.renderScale ?? {};
+  const platinumWatcher = raw.platinumWatcher ?? {};
 
   return {
     deleteMenuMessages:
@@ -77,6 +111,13 @@ export function loadFeatureFlags(): FeatureFlags {
       summary: readRenderScale(renderScale.summary),
       table: readRenderScale(renderScale.table),
       popular: readRenderScale(renderScale.popular)
+    },
+    platinumWatcher: {
+      enabled:
+        typeof platinumWatcher.enabled === "boolean"
+          ? platinumWatcher.enabled
+          : DEFAULTS.platinumWatcher.enabled,
+      pollMinutes: readPollMinutes(platinumWatcher.pollMinutes)
     }
   };
 }
