@@ -1,8 +1,8 @@
 {
   "deleteMenuMessages": true,
   "renderScale": {
-    "summary": 1.2,
-    "table": 1.1,
-    "popular": 1.1
+    "summary": 1,
+    "table": 1,
+    "popular": 1
   }
 }
