@@ -323,6 +323,7 @@ type RawTokenResponse = {
   refresh_token?: unknown;
   expires_in?: unknown;
   refresh_token_expires_in?: unknown;
+  scope?: unknown;
   error?: unknown;
   error_description?: unknown;
 };
@@ -418,6 +419,14 @@ async function requestAuthTokens(body: URLSearchParams): Promise<AuthState> {
     refreshTokenExpiresIn > 0
       ? refreshTokenExpiresIn * 1000
       : DEFAULT_REFRESH_TOKEN_TTL_MS;
+
+  // Log the *granted* scope per grant type. The mobile gamelist v2 endpoint
+  // (recently-played games) needs `psn:clientapp`; if the refresh_token grant
+  // returns a token without it while the NPSSO authorization_code grant keeps it,
+  // that explains "недавние игры" disappearing only after the first token refresh.
+  const grantType = body.get("grant_type") ?? "unknown";
+  const grantedScope = typeof parsed.scope === "string" ? parsed.scope : "(none)";
+  console.log(`[psn-auth] token minted grant=${grantType} scope="${grantedScope}"`);
 
   return {
     accessToken,
