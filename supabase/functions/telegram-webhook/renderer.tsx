@@ -72,7 +72,7 @@ const COVER_TEXT = "#8794a5";
 // Logical layout width used by Satori for all cards. Resvg then rasterizes the SVG
 // at `width * scale` px. Self-hosted on a VPS there's no Edge CPU cap, so every
 // card upscales for crisp text/icons; embedded images (avatars 240–512px, trophy
-// PNGs 240px, covers ~512px) all out-resolve their on-card size at 2×, so they
+// PNGs ~210px, covers ~512px) all out-resolve their on-card size at 2×, so they
 // stay sharp. The only ceiling is Telegram's sendPhoto limit (width + height must
 // stay under 10000 px), which auto-shrinks only pathologically tall tables.
 // Per-response scaleMultiplier (config/features.json → renderScale.*) multiplies
