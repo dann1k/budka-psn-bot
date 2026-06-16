@@ -1082,7 +1082,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
           trophies: summary.trophies
         };
 
-        const cardPng = await renderGamerCard(mockPlayer, summary);
+        const cardPng = await renderGamerCard(mockPlayer, summary, config.features.renderScale.summary);
         if (ctx.replyWithPhoto) {
           await ctx.replyWithPhoto(new InputFile(cardPng, `${summary.onlineId}_card.png`), {
             reply_markup: hintReset,
@@ -1164,7 +1164,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
         return;
       }
 
-      const cardPng = await renderGamerCard(aggregated, preferred.summary);
+      const cardPng = await renderGamerCard(aggregated, preferred.summary, config.features.renderScale.summary);
 
       if (ctx.replyWithPhoto) {
         await ctx.replyWithPhoto(new InputFile(cardPng, `${preferred.summary.onlineId}_card.png`), {
@@ -1560,7 +1560,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
 
       try {
         const renderStartedAt = Date.now();
-        const popularPng = await renderPopularGames(renderInput);
+        const popularPng = await renderPopularGames(renderInput, config.features.renderScale.popular);
         const renderDurationMs = Date.now() - renderStartedAt;
         console.log(
           `[popular] render done: bytes=${popularPng.byteLength} durationMs=${renderDurationMs}`,
@@ -1732,7 +1732,7 @@ export function createBot(config: BotConfig, repository: LinkRepository, psnServ
       }
 
       const renderStartedAt = Date.now();
-      const tablePng = await renderLeaderboard(sorted);
+      const tablePng = await renderLeaderboard(sorted, config.features.renderScale.table);
       console.log(
         `[table] render done bytes=${tablePng.byteLength} ms=${Date.now() - renderStartedAt}`,
       );

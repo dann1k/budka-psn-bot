@@ -32,13 +32,16 @@ export const Fragment = (props: any) => props.children;
 // `width * scale` px; rasterization CPU cost is ~proportional to the output pixel
 // count, and Supabase Edge Functions on the free plan cap CPU at ~2s per request.
 // Summary is a fixed 800x550 card and survives an upscale for crisper text.
-// Leaderboard and popular grow taller with chat size, so they DON'T use a fixed
-// scale: computeOutputWidth() caps the *total* output pixels to a budget (never
-// upscaling past 1.0x), so a big table auto-downscales instead of getting killed
-// mid-render (which made the worker shut down and Telegram retry the webhook).
+// Leaderboard and popular grow taller with chat size, so by default they DON'T
+// upscale: computeOutputWidth() caps the *total* output pixels to a budget, so a
+// big table auto-downscales instead of getting killed mid-render (which made the
+// worker shut down and Telegram retry the webhook).
+// Per-response scaleMultiplier (config/features.json → renderScale.*) raises both
+// the upscale ceiling AND the pixel budget, so the operator can trade CPU for
+// resolution per card type — at their own risk of the ~2s limit on big chats.
 const CARD_LOGICAL_WIDTH = 800;
 const SUMMARY_RENDER_SCALE = 1.4;
-const SUMMARY_OUTPUT_WIDTH = Math.round(CARD_LOGICAL_WIDTH * SUMMARY_RENDER_SCALE);
+const SUMMARY_LOGICAL_HEIGHT = 550;
 const CARD_BACKGROUND = "#070b19";
 
 // Max output pixels (width * height) for growable cards. ~1.05M px (960x1100, the
@@ -50,9 +53,22 @@ const CARD_BACKGROUND = "#070b19";
 const RASTER_PIXEL_BUDGET = 1_000_000;
 const MIN_OUTPUT_WIDTH = 560;
 
-function computeOutputWidth(logicalWidth: number, logicalHeight: number, maxScale: number): number {
+// baseScale — потолок апскейла относительно логической ширины; пиксельный бюджет
+// (по площади) не даёт большой карточке выжрать CPU (Edge Function ~2с) — она
+// авто-уменьшается, а не падает на середине рендера. scaleMultiplier (из
+// config/features.json → renderScale.*) множит И потолок апскейла, И бюджет
+// (в квадрате: бюджет в px², линейное разрешение растёт ~×multiplier), поэтому один
+// множитель управляет разрешением и у маленьких, и у растущих карточек. 1 = как было.
+function computeOutputWidth(
+  logicalWidth: number,
+  logicalHeight: number,
+  baseScale: number,
+  scaleMultiplier = 1
+): number {
+  const maxScale = baseScale * scaleMultiplier;
+  const budget = RASTER_PIXEL_BUDGET * scaleMultiplier * scaleMultiplier;
   const widthByScale = Math.round(logicalWidth * maxScale);
-  const budgetScale = Math.sqrt(RASTER_PIXEL_BUDGET / (logicalWidth * logicalHeight));
+  const budgetScale = Math.sqrt(budget / (logicalWidth * logicalHeight));
   const widthByBudget = Math.round(logicalWidth * budgetScale);
   return Math.max(MIN_OUTPUT_WIDTH, Math.min(widthByScale, widthByBudget));
 }
@@ -300,7 +316,7 @@ function getStatusBadge(status: string | undefined, currentGames: string[], last
 
 // --- Main Render Functions ---
 
-export async function renderGamerCard(player: AggregatedPlayer, preferredSummary: PsnSummary): Promise<Uint8Array> {
+export async function renderGamerCard(player: AggregatedPlayer, preferredSummary: PsnSummary, scaleMultiplier = 1): Promise<Uint8Array> {
   await initRenderer();
   if (preferredSummary.hasPlus) {
     await preloadPlayStationPlusImage();
@@ -596,18 +612,26 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
     ],
   });
 
+  const outputWidth = computeOutputWidth(
+    CARD_LOGICAL_WIDTH,
+    SUMMARY_LOGICAL_HEIGHT,
+    SUMMARY_RENDER_SCALE,
+    scaleMultiplier,
+  );
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
-      value: SUMMARY_OUTPUT_WIDTH,
+      value: outputWidth,
     },
   });
 
   const pngData = resvg.render();
-  return pngData.asPng();
+  const png = pngData.asPng();
+  console.log(`[summary-render] scale=${scaleMultiplier} outW=${outputWidth}`);
+  return png;
 }
 
-export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Uint8Array> {
+export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultiplier = 1): Promise<Uint8Array> {
   await initRenderer();
 
   const rowHeight = 90;
@@ -892,7 +916,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   });
   const satoriDoneAt = Date.now();
 
-  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1);
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1, scaleMultiplier);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
@@ -903,12 +927,12 @@ export async function renderLeaderboard(players: AggregatedPlayer[]): Promise<Ui
   const pngData = resvg.render();
   const png = pngData.asPng();
   console.log(
-    `[leaderboard-render] players=${players.length} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
+    `[leaderboard-render] players=${players.length} scale=${scaleMultiplier} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
   );
   return png;
 }
 
-export async function renderPopularGames(games: PopularGameCardItem[]): Promise<Uint8Array> {
+export async function renderPopularGames(games: PopularGameCardItem[], scaleMultiplier = 1): Promise<Uint8Array> {
   await initRenderer();
 
   const topGames = games.slice(0, 5);
@@ -1125,7 +1149,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
   });
   const satoriDoneAt = Date.now();
 
-  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1);
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1, scaleMultiplier);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
@@ -1136,7 +1160,7 @@ export async function renderPopularGames(games: PopularGameCardItem[]): Promise<
   const pngData = resvg.render();
   const png = pngData.asPng();
   console.log(
-    `[popular-render] games=${topGames.length} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
+    `[popular-render] games=${topGames.length} scale=${scaleMultiplier} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
   );
   return png;
 }
