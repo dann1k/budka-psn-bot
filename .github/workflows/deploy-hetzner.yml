@@ -1,0 +1,78 @@
+name: Deploy Bot (Hetzner)
+
+# Ships the bot to a self-hosted VPS where it runs as a long-running Deno
+# systemd service (long-polling, no webhook). Mirrors the GoydaFlix deploy:
+# SCP the sources, write .env from GitHub secrets, restart the unit.
+#
+# One-time server setup (install Deno, create the systemd unit, etc.) is in
+# README.md → "Самостоятельный хостинг (Hetzner)".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/telegram-webhook/**'
+      - 'config/**'
+      - 'renderer-assets-source/**'
+      - 'server/**'
+      - 'deno.json'
+      - 'deno.lock'
+      - '.github/workflows/deploy-hetzner.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show deploy source revision
+        run: |
+          echo "ref=${GITHUB_REF}"
+          echo "sha=${GITHUB_SHA}"
+
+      # Preserves the repo layout under /opt/budka-psn-bot so the static import
+      # ../../../config/features.json in features.ts keeps resolving on the server.
+      - name: Copy sources to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "supabase,config,renderer-assets-source,server,deno.json,deno.lock"
+          target: /opt/budka-psn-bot/
+          overwrite: true
+
+      - name: Write .env, type-check, restart service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+            export PATH="$PATH:/usr/local/bin:/root/.deno/bin"
+
+            # Secrets → .env (long-polling needs no public URL/webhook secret, but
+            # getConfig() still requires the webhook secret env var, so keep it).
+            cat > /opt/budka-psn-bot/.env << 'ENVEOF'
+            BUDKA_PSN_TELEGRAM_BOT_TOKEN=${{ secrets.BUDKA_PSN_TELEGRAM_BOT_TOKEN }}
+            BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET=${{ secrets.BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET }}
+            BUDKA_PSN_NPSSO=${{ secrets.BUDKA_PSN_NPSSO }}
+            BUDKA_PSN_SUPABASE_SECRET_KEY=${{ secrets.BUDKA_PSN_SUPABASE_SECRET_KEY }}
+            BUDKA_PSN_AUTH_ENCRYPTION_KEY=${{ secrets.BUDKA_PSN_AUTH_ENCRYPTION_KEY }}
+            SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+            RENDERER_ASSETS_DIR=/opt/budka-psn-bot/renderer-assets-source
+            ENVEOF
+            chmod 600 /opt/budka-psn-bot/.env
+
+            cd /opt/budka-psn-bot
+            # Fails fast (and leaves the running bot untouched) if the deploy is broken.
+            deno check server/main.ts
+
+            systemctl restart budka-psn-bot
+            sleep 4
+            systemctl is-active budka-psn-bot
+            journalctl -u budka-psn-bot -n 25 --no-pager || true

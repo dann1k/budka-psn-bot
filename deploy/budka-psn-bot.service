@@ -1,0 +1,20 @@
+[Unit]
+Description=Budka PSN Telegram bot (Deno, long-polling)
+Documentation=https://github.com/dann1k/budka-psn-bot
+After=network-online.target
+Wants=network-online.target
+# Always restart, even after many quick crashes (transient Telegram/PSN outages).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/budka-psn-bot
+ExecStart=/usr/local/bin/deno run --allow-all --env-file=/opt/budka-psn-bot/.env /opt/budka-psn-bot/server/main.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=budka-psn-bot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,8 @@
 {
   "nodeModulesDir": "auto",
   "tasks": {
-    "check": "deno check supabase/functions/telegram-webhook/index.ts",
-    "test": "deno test -A tests/"
+    "check": "deno check supabase/functions/telegram-webhook/index.ts server/main.ts",
+    "test": "deno test -A tests/",
+    "start": "deno run --allow-all --env-file=.env server/main.ts"
   }
 }

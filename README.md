@@ -170,6 +170,44 @@ BUDKA_PSN_AUTH_ENCRYPTION_KEY=...
 
 Перед первым деплоем нужно создать Supabase project и заполнить GitHub Actions secrets.
 
+## Самостоятельный хостинг (Hetzner)
+
+Альтернатива Edge Functions: гонять бота как обычный long-running процесс на своём VPS. Зачем — у Edge лимит CPU ~2с на запрос, который мешает рендерить «тяжёлые» картинки (тени, высокий `renderScale`). На VPS лимита нет.
+
+Тот же код, что и на Edge. Отличия только по краям:
+
+- **Telegram через long-polling**, а не webhook ([`server/main.ts`](server/main.ts) → `bot.start()`). Не нужны домен, TLS, реверс-прокси и `secret_token`. На старте бот делает `deleteWebhook`, чтобы `getUpdates` не конфликтовал (409) с webhook от прошлого Edge-деплоя.
+- **Ассеты с диска**, а не из бакета: если задана переменная `RENDERER_ASSETS_DIR`, [`renderer-assets.ts`](supabase/functions/telegram-webhook/renderer-assets.ts) читает шрифты/wasm/иконки прямо из неё (на деплое это `renderer-assets-source/` рядом с кодом). Бакет и service-role-ключ при этом не нужны.
+- **Keep-alive в процессе**, а не через pg_cron: `server/main.ts` дёргает `ensureFreshAuthorization()` на старте и далее раз в сутки. Старый pg_cron-job (если включён) можно отключить (`select cron.unschedule('budka-psn-keepalive');`) — он будет просто 404-ить на снятую Edge-функцию, что безвредно.
+- БД **остаётся на Supabase**: к ней ходят по HTTPS через `@supabase/supabase-js`, так что с VPS — без изменений (нужны лишь env `SUPABASE_URL` + `BUDKA_PSN_SUPABASE_SECRET_KEY`).
+
+Деплой ([`.github/workflows/deploy-hetzner.yml`](.github/workflows/deploy-hetzner.yml), по образцу проекта GoydaFlix): на push в `main` GitHub Actions по SSH копирует исходники в `/opt/budka-psn-bot/`, пишет `.env` из секретов, делает `deno check` и `systemctl restart budka-psn-bot`. Авто-деплой на Edge (`deploy-supabase.yml`) при этом отключён (оставлен только ручной запуск для отката).
+
+**Разовая подготовка сервера** (Ubuntu, под `root`):
+
+```bash
+# 1) Deno + симлинк, на который ссылается systemd-юнит
+curl -fsSL https://deno.land/install.sh | sh
+ln -sf /root/.deno/bin/deno /usr/local/bin/deno
+
+# 2) systemd-юнит (шаблон в репозитории — deploy/budka-psn-bot.service)
+mkdir -p /opt/budka-psn-bot
+curl -fsSL https://raw.githubusercontent.com/dann1k/budka-psn-bot/main/deploy/budka-psn-bot.service \
+  -o /etc/systemd/system/budka-psn-bot.service
+systemctl daemon-reload
+systemctl enable budka-psn-bot   # запустится после первого деплоя, когда появятся файлы и .env
+```
+
+**GitHub Actions secrets** для деплоя на VPS (в дополнение к уже существующим `BUDKA_PSN_*`):
+
+| Секрет | Что это |
+|---|---|
+| `SERVER_IP` | IP VPS (SSH под `root`) |
+| `SSH_PRIVATE_KEY` | приватный SSH-ключ, чей публичный лежит в `~/.ssh/authorized_keys` на сервере |
+| `SUPABASE_URL` | URL проекта Supabase, напр. `https://<ref>.supabase.co` (на Edge подставлялся автоматически) |
+
+Затем push в `main` (или ручной запуск workflow) — первый деплой положит файлы, `.env` и стартует сервис.
+
 ## Настройка Supabase Storage
 
 Edge Function лениво подтягивает шрифты, `resvg.wasm`, PNG-иконки трофеев и логотип PS+ из приватного бакета Supabase Storage. Функция ходит туда с `service_role` ключом, который Supabase сам инжектит в env Edge Function как `SUPABASE_SERVICE_ROLE_KEY` (этот ключ обходит RLS, отдельные политики на `storage.objects` не нужны). Без бакета функция стартует с ошибкой `Failed to fetch renderer asset ...`.

@@ -1,9 +1,12 @@
 name: Deploy Supabase
 
+# DEPRECATED: the bot now runs self-hosted on a VPS via long-polling
+# (.github/workflows/deploy-hetzner.yml). This Edge Functions deploy is kept for
+# rollback only and no longer runs automatically on push — its "Configure
+# Telegram webhook" step would re-register a webhook, which 409-conflicts with
+# the VPS long-polling until the bot restarts. Trigger manually only if you
+# intentionally roll back to Edge (then stop the VPS service first).
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 env:

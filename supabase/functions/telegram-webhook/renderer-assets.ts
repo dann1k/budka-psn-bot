@@ -1,10 +1,31 @@
-// Renderer assets live in a private Supabase Storage bucket and are fetched
-// lazily on cold start using the auto-injected service_role key, which
-// bypasses RLS. The first call populates module-scoped caches so subsequent
-// invocations of the warm isolate reuse the buffers without further network
-// round-trips.
+// Renderer assets (fonts, resvg.wasm, trophy/PS+ icons) are loaded lazily on
+// first use and cached in module scope, so a warm process reuses the buffers
+// without further round-trips.
+//
+// Two sources, picked per call:
+//   • RENDERER_ASSETS_DIR set → read the file straight off local disk. Used when
+//     self-hosting (Hetzner VPS): the files are shipped next to the code, so no
+//     Supabase Storage / service_role key is involved.
+//   • otherwise → fetch from the private Supabase Storage bucket with the
+//     auto-injected service_role key (the Edge Functions deployment).
 
 const BUCKET_NAME = "renderer-assets";
+
+function getLocalAssetDir(): string | null {
+  const dir = Deno.env.get("RENDERER_ASSETS_DIR");
+  return dir && dir.trim() !== "" ? dir.replace(/\/$/, "") : null;
+}
+
+async function readLocalAssetBuffer(dir: string, fileName: string): Promise<ArrayBuffer> {
+  try {
+    const bytes = await Deno.readFile(`${dir}/${fileName}`);
+    // Detach a standalone ArrayBuffer from the Uint8Array view.
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read renderer asset ${fileName} from ${dir}: ${message}`);
+  }
+}
 
 function readEnv(name: string): string {
   const value = Deno.env.get(name);
@@ -21,6 +42,11 @@ function getBucketBaseUrl(): string {
 }
 
 async function fetchAssetBuffer(fileName: string): Promise<ArrayBuffer> {
+  const localDir = getLocalAssetDir();
+  if (localDir) {
+    return await readLocalAssetBuffer(localDir, fileName);
+  }
+
   const url = `${getBucketBaseUrl()}/${fileName}`;
   const serviceRoleKey = readEnv("SUPABASE_SERVICE_ROLE_KEY");
   const response = await fetch(url, {
