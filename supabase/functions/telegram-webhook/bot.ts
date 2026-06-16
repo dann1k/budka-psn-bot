@@ -20,7 +20,7 @@ import {
 import type { EmojiConfig, LinkedAccount, LinkedUser } from "./types.ts";
 import type { FeatureFlags } from "./features.ts";
 import { renderGamerCard, renderLeaderboard, renderPopularGames } from "./renderer.tsx";
-import { texts } from "./texts.ts";
+import { texts } from "../../../config/texts.ts";
 import {
   buildLeaderboardHtml,
   buildPopularHtml,

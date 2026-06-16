@@ -17,7 +17,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 - `supabase/functions/telegram-webhook/psn-auth-store.ts` — зашифрованное хранение PSN access/refresh tokens в Supabase.
 - `supabase/functions/telegram-webhook/format.ts` — форматирование rich messages и Telegram entities.
 - `supabase/functions/telegram-webhook/emojis.ts` — tracked emoji-конфиг без runtime-чтения JSON.
-- `supabase/functions/telegram-webhook/texts.ts` — tracked конфиг всех текстов кнопок и ответов бота (см. ниже раздел «Тексты кнопок и ответов»).
+- `config/texts.ts` — tracked конфиг всех текстов кнопок и ответов бота, лежит рядом с `config/features.json` (см. ниже раздел «Тексты кнопок и ответов»).
 - `supabase/functions/telegram-webhook/renderer-assets.ts` — ленивая загрузка ассетов (Inter, `resvg.wasm`, иконки трофеев, логотип PS+) из приватного бакета Supabase Storage `renderer-assets`; буферы кэшируются в памяти изолята. См. ниже раздел «Настройка Supabase Storage».
 - `renderer-assets-source/` — исходные renderer assets и их лицензии. Файлы из этой папки нужно вручную загружать в бакет `renderer-assets` при обновлении. В Supabase deploy bundle папка не попадает.
 - `supabase/migrations/` — схема Postgres.
@@ -60,7 +60,7 @@ Telegram-бот для групповых чатов с PSN-статистико
 
 ## Тексты кнопок и ответов
 
-Все пользовательские тексты — подписи кнопок меню, ответы команд, ошибки, подсказки пошаговых действий и справка `/help` — собраны в одном файле `supabase/functions/telegram-webhook/texts.ts`. В `bot.ts` нет захардкоженных строк: код ссылается на `texts.*`.
+Все пользовательские тексты — подписи кнопок меню, ответы команд, ошибки, подсказки пошаговых действий и справка `/help` — собраны в одном файле `config/texts.ts` (рядом с `config/features.json`, бандлится в Edge Function через импорт в `bot.ts`/`rich.ts`). В `bot.ts` нет захардкоженных строк: код ссылается на `texts.*`.
 
 - Статичные строки лежат как литералы, строки с подстановкой (`${...}`) — как короткие функции (например `texts.link.added(onlineId)`), а справка `/help` — функция от `{ inPrivate }`.
 - Чтобы поменять формулировку или подпись кнопки, отредактируй нужное поле в `texts.ts` и сделай push в `main`. Автодеплой (`.github/workflows/deploy-supabase.yml`) пересоберёт Edge Function, и бот начнёт отдавать новый текст — отдельная миграция БД или ручная загрузка не нужны.

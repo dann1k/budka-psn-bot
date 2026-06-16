@@ -1,4 +1,4 @@
-import type { PendingTelegramAction } from "./repository.ts";
+import type { PendingTelegramAction } from "../supabase/functions/telegram-webhook/repository.ts";
 
 // Единый конфиг всех текстов кнопок и ответов бота. Здесь можно править любые
 // формулировки и подписи кнопок, не трогая логику в bot.ts. После push в main

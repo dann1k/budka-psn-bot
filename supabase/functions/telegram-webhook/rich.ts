@@ -12,7 +12,7 @@
 import type { Api } from "npm:grammy@1.41.1/web";
 import type { InlineKeyboardMarkup, Message } from "npm:grammy@1.41.1/types";
 import { getFlagEmoji, type AccountLabel } from "./format.ts";
-import { texts } from "./texts.ts";
+import { texts } from "../../../config/texts.ts";
 import type { EmojiConfig, EmojiToken } from "./types.ts";
 // Только типы — на рантайме импорт стирается, поэтому цикла bot.ts ⇄ rich.ts нет
 // (значение зависит лишь в одну сторону: bot.ts → rich.ts).
