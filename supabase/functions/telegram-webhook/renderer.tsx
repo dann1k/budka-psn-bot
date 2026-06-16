@@ -2,7 +2,8 @@
 /** @jsx h */
 /** @jsxFrag Fragment */
 import satori from "npm:satori@0.13.0";
-import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
+// resvg (SVG→PNG) is loaded dynamically — native @resvg/resvg-js with a wasm
+// fallback. See initResvg().
 import type { PsnSummary } from "./psn.ts";
 import type { AggregatedPlayer } from "./bot.ts";
 import {
@@ -134,7 +135,48 @@ function estimatePillLines(players: readonly string[], maxWidth: number): number
 }
 
 // --- Cache for WASM and Fonts ---
-let isWasmInit = false;
+// --- Rasterizer (SVG → PNG) ---
+// Prefer native @resvg/resvg-js: same resvg engine as the wasm build, so output
+// is pixel-identical, but ~3–4× faster on the blur-heavy cards (measured). If the
+// native napi addon can't load on the host (or RESVG_FORCE_WASM=1), transparently
+// fall back to resvg-wasm so the bot keeps rendering anywhere.
+let ResvgClass: any = null;
+let usingNativeResvg = false;
+
+async function initResvg(): Promise<void> {
+  if (ResvgClass) return;
+
+  if (Deno.env.get("RESVG_FORCE_WASM") !== "1") {
+    try {
+      const native = await import("npm:@resvg/resvg-js@2.6.2");
+      ResvgClass = native.Resvg;
+      usingNativeResvg = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[renderer] native resvg unavailable (${message}); falling back to wasm`);
+    }
+  }
+
+  if (!ResvgClass) {
+    const { initWasm, Resvg } = await import("npm:@resvg/resvg-wasm@2.6.2");
+    await initWasm(await getResvgWasmBuffer());
+    ResvgClass = Resvg;
+    usingNativeResvg = false;
+  }
+
+  // Warm the backend so the first real card isn't penalized by lazy napi/wasm init.
+  try {
+    rasterize('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"></svg>', 2);
+  } catch {
+    /* best-effort warm-up */
+  }
+  console.log(`[renderer] resvg backend: ${usingNativeResvg ? "native @resvg/resvg-js" : "wasm"}`);
+}
+
+function rasterize(svg: string, outputWidth: number): Uint8Array {
+  const resvg = new ResvgClass(svg, { fitTo: { mode: "width", value: outputWidth } });
+  return resvg.render().asPng();
+}
 let manropeRegularBuffer: ArrayBuffer | null = null;
 let manropeBoldBuffer: ArrayBuffer | null = null;
 let manropeExtraBoldBuffer: ArrayBuffer | null = null;
@@ -150,11 +192,7 @@ function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
 }
 
 async function initRenderer() {
-  if (!isWasmInit) {
-    const wasmBuffer = await getResvgWasmBuffer();
-    await initWasm(wasmBuffer);
-    isWasmInit = true;
-  }
+  await initResvg();
 
   if (!manropeRegularBuffer) {
     manropeRegularBuffer = await getManropeRegularBuffer();
@@ -666,15 +704,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
   });
 
   const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, summaryHeight, SUMMARY_RENDER_SCALE, scaleMultiplier);
-  const resvg = new Resvg(svg, {
-    fitTo: {
-      mode: "width",
-      value: outputWidth,
-    },
-  });
-
-  const pngData = resvg.render();
-  const png = pngData.asPng();
+  const png = rasterize(svg, outputWidth);
   console.log(`[summary-render] scale=${scaleMultiplier} outW=${outputWidth}`);
   return png;
 }
@@ -890,15 +920,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultip
   const satoriDoneAt = Date.now();
 
   const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, GROWABLE_RENDER_SCALE, scaleMultiplier);
-  const resvg = new Resvg(svg, {
-    fitTo: {
-      mode: "width",
-      value: outputWidth,
-    },
-  });
-
-  const pngData = resvg.render();
-  const png = pngData.asPng();
+  const png = rasterize(svg, outputWidth);
   console.log(
     `[leaderboard-render] players=${players.length} scale=${scaleMultiplier} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
   );
@@ -1071,15 +1093,7 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
   const satoriDoneAt = Date.now();
 
   const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, GROWABLE_RENDER_SCALE, scaleMultiplier);
-  const resvg = new Resvg(svg, {
-    fitTo: {
-      mode: "width",
-      value: outputWidth,
-    },
-  });
-
-  const pngData = resvg.render();
-  const png = pngData.asPng();
+  const png = rasterize(svg, outputWidth);
   console.log(
     `[popular-render] games=${topGames.length} scale=${scaleMultiplier} outW=${outputWidth} images=${imagesFetchedAt - renderStartedAt}ms satori=${satoriDoneAt - imagesFetchedAt}ms resvg=${Date.now() - satoriDoneAt}ms`,
   );
