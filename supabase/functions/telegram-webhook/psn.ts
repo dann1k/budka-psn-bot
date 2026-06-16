@@ -792,18 +792,37 @@ export class PsnService {
 
   private async getPlayedGamesRichSafe(accessToken: string, accountId: string): Promise<PsnPlayedGameRich[]> {
     try {
-      const response = await psnApi.getUserPlayedGames(
-        { accessToken },
-        accountId,
-        { limit: 3, offset: 0, categories: "ps5_native_game,ps4_game,pspc_game,unknown" }
+      const response = await withTimeout(
+        psnApi.getUserPlayedGames(
+          { accessToken },
+          accountId,
+          { limit: 3, offset: 0, categories: "ps5_native_game,ps4_game,pspc_game,unknown" }
+        ),
+        PSN_OPERATION_TIMEOUT_MS,
+        "played-games"
       );
 
-      return (response.titles || []).slice(0, 3).map((title) => ({
+      const titles = response.titles || [];
+      if (titles.length === 0) {
+        // Empty (not an error): the gamelist v2 endpoint returns an empty list when
+        // the queried account's "games you've played" privacy hides it from the bot
+        // account (not a friend), or when the request region is gated. Log so this
+        // is distinguishable from a real fetch failure.
+        console.warn(`[psn-played] empty played-games list for account=${accountId}`);
+      }
+
+      return titles.slice(0, 3).map((title) => ({
         name: title.localizedName || title.name,
         imageUrl: title.localizedImageUrl || title.imageUrl || title.concept?.media?.images?.[0]?.url || null,
         playDuration: title.playDuration || "PT0H"
       }));
-    } catch {
+    } catch (error) {
+      // Previously swallowed silently, which hid the real cause of an empty
+      // "недавние игры" section. Keep returning [] so the card still renders,
+      // but surface status + message so the failure can be diagnosed from logs.
+      const status = getErrorStatus(error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[psn-played] failed for account=${accountId} status=${status ?? "n/a"}: ${message}`);
       return [];
     }
   }
