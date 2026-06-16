@@ -295,20 +295,20 @@ function pluralizeRu(value: number, forms: [string, string, string]): string {
 function getStatusBadge(status: string | undefined, currentGames: string[], lastOnline: string | null): { text: string; color: string; ringColor: string } {
   if (status === "playing") {
     return {
-      text: `🎮 В игре: ${currentGames[0] || "играет"}`,
+      text: `В игре: ${currentGames[0] || "играет"}`,
       color: "#06b6d4",
       ringColor: "#06b6d4",
     };
   }
   if (status === "online") {
     return {
-      text: "🟢 В сети",
+      text: "В сети",
       color: "#10b981",
       ringColor: "#10b981",
     };
   }
   return {
-    text: `🔘 Сеть: ${getRelativeTimeStr(lastOnline)}`,
+    text: `Сеть: ${getRelativeTimeStr(lastOnline)}`,
     color: "#9ca3af",
     ringColor: "#4b5563",
   };
@@ -415,9 +415,21 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
           <span style={{ fontSize: "16px", color: "#a5b4fc", fontWeight: "500", marginBottom: "4px" }}>
             {player.user.username ? `@${player.user.username}` : player.user.displayName}
           </span>
-          <span style={{ fontSize: "14px", color: statusInfo.color, fontWeight: "600" }}>
-            {statusInfo.text}
-          </span>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                width: "9px",
+                height: "9px",
+                borderRadius: "50%",
+                backgroundColor: statusInfo.color,
+                marginRight: "7px",
+              }}
+            />
+            <span style={{ fontSize: "14px", color: statusInfo.color, fontWeight: "600" }}>
+              {statusInfo.text}
+            </span>
+          </div>
         </div>
       </div>
 
