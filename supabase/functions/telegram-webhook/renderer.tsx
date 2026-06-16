@@ -40,13 +40,11 @@ const FONT_MONO = "Space Mono";
 const PAGE_BG = "#eceef1"; // light frame behind the card → makes the rounded corners + shadow read
 const CARD_BG = "#ffffff";
 const CARD_BORDER = "#e6e9ee";
-// resvg's Gaussian blur cost scales with the blurred AREA (box-blur, ~radius-
-// independent), so a card-wide drop shadow added ~150–400ms per card — a 2–4×
-// CPU regression that risks the Supabase Edge ~2s cap on big chats. The card is
-// defined instead by the light outer frame + 1px border, which keeps the render
-// strictly lighter than the pre-redesign dark cards. Do NOT reintroduce a blurred
-// box-shadow over the card/avatar.
-const CARD_SHADOW = "none";
+// Soft drop shadow exactly as in the design mockup. resvg's Gaussian blur is
+// expensive (cost ~proportional to the blurred area, not the radius), which is
+// why it was dropped while the bot ran on Supabase Edge (~2s CPU cap). Self-hosted
+// on a VPS there's no such cap, so the mockup's floating-card look is restored.
+const CARD_SHADOW = "0 14px 34px rgba(15,30,60,0.08)";
 const CARD_RADIUS = 22;
 
 const INK = "#0a1020"; // primary headings / numbers
@@ -70,50 +68,36 @@ const TRACK = "#e2e8f0"; // progress / popularity track
 const COVER_BG = "#e8edf3"; // game cover placeholder
 const COVER_TEXT = "#8794a5";
 
-// Logical layout width used by Satori for all cards. Resvg rasterizes the SVG at
-// `width * scale` px; rasterization CPU cost is ~proportional to the output pixel
-// count, and Supabase Edge Functions on the free plan cap CPU at ~2s per request.
-// Summary is a fixed-size card and survives an upscale for crisper text.
-// Leaderboard and popular grow taller with chat size, so by default they DON'T
-// upscale: computeOutputWidth() caps the *total* output pixels to a budget, so a
-// big table auto-downscales instead of getting killed mid-render (which made the
-// worker shut down and Telegram retry the webhook).
-// Per-response scaleMultiplier (config/features.json → renderScale.*) raises both
-// the upscale ceiling AND the pixel budget, so the operator can trade CPU for
-// resolution per card type — at their own risk of the ~2s limit on big chats.
+// Logical layout width used by Satori for all cards. Resvg then rasterizes the SVG
+// at `width * scale` px. Self-hosted on a VPS there's no Edge CPU cap, so every
+// card upscales for crisp text/icons; embedded images (avatars 240–512px, trophy
+// PNGs 240px, covers ~512px) all out-resolve their on-card size at 2×, so they
+// stay sharp. The only ceiling is Telegram's sendPhoto limit (width + height must
+// stay under 10000 px), which auto-shrinks only pathologically tall tables.
+// Per-response scaleMultiplier (config/features.json → renderScale.*) multiplies
+// the base scale, so the operator can push resolution further per card type.
 const CARD_LOGICAL_WIDTH = 800;
-const SUMMARY_RENDER_SCALE = 1.4;
-
-// Max output pixels (width * height) for growable cards. ~1.05M px blew the CPU
-// budget WITH full-size avatars + radial gradients. After Lane 1 (small avatars +
-// flat backgrounds) the per-pixel cost dropped, so a typical table now renders at
-// native 1.0x within budget. MIN_OUTPUT_WIDTH keeps very large tables legible at
-// the cost of slightly exceeding the budget.
-const RASTER_PIXEL_BUDGET = 1_000_000;
-const MIN_OUTPUT_WIDTH = 560;
+const SUMMARY_RENDER_SCALE = 2.0; // fixed-size summary card
+const GROWABLE_RENDER_SCALE = 2.0; // leaderboard + popular (grow with chat size)
+const TELEGRAM_MAX_DIMENSION_SUM = 9000; // keep width + height < 10000 for sendPhoto
 
 // Outer light frame so the white card's rounded corners + shadow are visible.
 const OUTER_PAD = 28;
 const CARD_PAD = 30;
 
-// baseScale — потолок апскейла относительно логической ширины; пиксельный бюджет
-// (по площади) не даёт большой карточке выжрать CPU (Edge Function ~2с) — она
-// авто-уменьшается, а не падает на середине рендера. scaleMultiplier (из
-// config/features.json → renderScale.*) множит И потолок апскейла, И бюджет
-// (в квадрате: бюджет в px², линейное разрешение растёт ~×multiplier), поэтому один
-// множитель управляет разрешением и у маленьких, и у растущих карточек. 1 = как было.
+// Output width = logicalWidth × baseScale × scaleMultiplier, shrunk only if the
+// resulting width + height would breach Telegram's photo dimension limit (so a
+// huge leaderboard still sends instead of being rejected).
 function computeOutputWidth(
   logicalWidth: number,
   logicalHeight: number,
   baseScale: number,
   scaleMultiplier = 1
 ): number {
-  const maxScale = baseScale * scaleMultiplier;
-  const budget = RASTER_PIXEL_BUDGET * scaleMultiplier * scaleMultiplier;
-  const widthByScale = Math.round(logicalWidth * maxScale);
-  const budgetScale = Math.sqrt(budget / (logicalWidth * logicalHeight));
-  const widthByBudget = Math.round(logicalWidth * budgetScale);
-  return Math.max(MIN_OUTPUT_WIDTH, Math.min(widthByScale, widthByBudget));
+  const targetScale = baseScale * scaleMultiplier;
+  const telegramMaxScale = TELEGRAM_MAX_DIMENSION_SUM / (logicalWidth + logicalHeight);
+  const scale = Math.min(targetScale, telegramMaxScale);
+  return Math.max(1, Math.round(logicalWidth * scale));
 }
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
@@ -440,6 +424,7 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
             borderRadius: "50%",
             overflow: "hidden",
             marginRight: "18px",
+            boxShadow: "0 6px 16px rgba(0,112,209,0.35)",
           }}
         >
           {avatarBase64 ? (
@@ -710,7 +695,8 @@ export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultip
   const avatars = await Promise.all(
     players.map((player) => {
       const summary = player.accountSummaries[0];
-      return fetchImageBase64(summary?.avatarUrlSmall ?? summary?.avatarUrl);
+      // VPS has no per-render CPU cap, so prefer the full-size avatar for crisp 2× rows.
+      return fetchImageBase64(summary?.avatarUrl ?? summary?.avatarUrlSmall);
     }),
   );
   const imagesFetchedAt = Date.now();
@@ -903,7 +889,7 @@ export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultip
   });
   const satoriDoneAt = Date.now();
 
-  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1, scaleMultiplier);
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, GROWABLE_RENDER_SCALE, scaleMultiplier);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
@@ -1084,7 +1070,7 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
   });
   const satoriDoneAt = Date.now();
 
-  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, 1, scaleMultiplier);
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, calculatedHeight, GROWABLE_RENDER_SCALE, scaleMultiplier);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",

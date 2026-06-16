@@ -327,10 +327,10 @@ node scripts/migrate-sqlite-to-supabase.mjs --sqlite=data/bot.sqlite --env-file=
 
 ### Keep-alive (бот живёт вечно даже без трафика)
 
-Refresh token живёт ~60 дней и продлевается только при ротации. Чтобы простаивающий чат не дал ему протухнуть, есть keep-alive: scheduled job дёргает Edge Function, а та ротирует refresh token.
+Refresh token живёт ~60 дней и продлевается только при ротации. Чтобы простаивающий чат не дал ему протухнуть, есть keep-alive — ротация non-destructive: при transient-сбое старый токен остаётся на месте.
 
-- Endpoint: любой запрос к функции с заголовком `x-budka-keepalive: <BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET>` запускает `ensureFreshAuthorization()` (ротация non-destructive: при transient-сбое старый токен остаётся на месте).
-- Расписание через Supabase Cron (pg_cron + pg_net): см. [`supabase/keepalive-cron.sql`](supabase/keepalive-cron.sql) — запусти один раз в SQL Editor (или собери job в Dashboard → Integrations → Cron). Рекомендуемая частота — ежедневно: огромный запас против 60-дневного окна.
+- **На VPS (текущий хостинг):** keep-alive в процессе — [`server/main.ts`](server/main.ts) дёргает `ensureFreshAuthorization()` на старте и раз в сутки. Ничего настраивать не надо.
+- **На Edge (только при откате):** endpoint — любой запрос к функции с заголовком `x-budka-keepalive: <BUDKA_PSN_TELEGRAM_WEBHOOK_SECRET>` запускает ту же ротацию; расписание через Supabase Cron (pg_cron + pg_net), см. [`supabase/keepalive-cron.sql`](supabase/keepalive-cron.sql). После переезда на VPS этот pg_cron-job можно снять: `select cron.unschedule('budka-psn-keepalive');`.
 
 ### Если бот всё-таки умер (NPSSO протух)
 

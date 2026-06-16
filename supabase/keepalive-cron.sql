@@ -1,4 +1,10 @@
 -- ============================================================================
+-- DEPRECATED — only for the Supabase Edge deployment (rollback path).
+-- The bot now self-hosts on a VPS and rotates the PSN token in-process
+-- (server/main.ts: ensureFreshAuthorization() on boot + daily), so this pg_cron
+-- job is no longer needed. If it is still scheduled, unschedule it:
+--   select cron.unschedule('budka-psn-keepalive');
+-- ============================================================================
 -- PSN keep-alive cron (Supabase pg_cron + pg_net)
 -- ============================================================================
 -- Purpose: rotate the PSN refresh token DAILY so the bot lives forever even with
