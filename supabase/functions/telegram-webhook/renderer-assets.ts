@@ -56,22 +56,38 @@ function cloneBuffer(buffer: ArrayBuffer): ArrayBuffer {
 }
 
 let resvgWasmPromise: Promise<ArrayBuffer> | null = null;
-let interRegularPromise: Promise<ArrayBuffer> | null = null;
-let interBoldPromise: Promise<ArrayBuffer> | null = null;
+let manropeRegularPromise: Promise<ArrayBuffer> | null = null;
+let manropeBoldPromise: Promise<ArrayBuffer> | null = null;
+let manropeExtraBoldPromise: Promise<ArrayBuffer> | null = null;
+let spaceMonoBoldPromise: Promise<ArrayBuffer> | null = null;
 
 export async function getResvgWasmBuffer(): Promise<ArrayBuffer> {
   resvgWasmPromise ??= fetchAssetBuffer("resvg.wasm");
   return cloneBuffer(await resvgWasmPromise);
 }
 
-export async function getInterRegularBuffer(): Promise<ArrayBuffer> {
-  interRegularPromise ??= fetchAssetBuffer("Inter-Regular.ttf");
-  return cloneBuffer(await interRegularPromise);
+// Manrope + Space Mono power the "PS5 Минимал" light card design. Manrope is the
+// body/heading face (weights 400/700/800, all with Cyrillic glyphs); Space Mono
+// is the monospace label/eyebrow face (Latin-only — Cyrillic in those labels
+// falls back to Manrope automatically via Satori's per-glyph font fallback).
+export async function getManropeRegularBuffer(): Promise<ArrayBuffer> {
+  manropeRegularPromise ??= fetchAssetBuffer("Manrope-Regular.ttf");
+  return cloneBuffer(await manropeRegularPromise);
 }
 
-export async function getInterBoldBuffer(): Promise<ArrayBuffer> {
-  interBoldPromise ??= fetchAssetBuffer("Inter-Bold.ttf");
-  return cloneBuffer(await interBoldPromise);
+export async function getManropeBoldBuffer(): Promise<ArrayBuffer> {
+  manropeBoldPromise ??= fetchAssetBuffer("Manrope-Bold.ttf");
+  return cloneBuffer(await manropeBoldPromise);
+}
+
+export async function getManropeExtraBoldBuffer(): Promise<ArrayBuffer> {
+  manropeExtraBoldPromise ??= fetchAssetBuffer("Manrope-ExtraBold.ttf");
+  return cloneBuffer(await manropeExtraBoldPromise);
+}
+
+export async function getSpaceMonoBoldBuffer(): Promise<ArrayBuffer> {
+  spaceMonoBoldPromise ??= fetchAssetBuffer("SpaceMono-Bold.ttf");
+  return cloneBuffer(await spaceMonoBoldPromise);
 }
 
 export type TrophyKind = "platinum" | "gold" | "silver" | "bronze";

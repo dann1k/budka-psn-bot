@@ -179,13 +179,17 @@ Edge Function лениво подтягивает шрифты, `resvg.wasm`, PN
 3. Открыть SQL Editor и выполнить `supabase/migrations/20260519230000_renderer_assets_storage_policy.sql` — миграция фиксирует приватный флаг бакета и удаляет старую публичную RLS-политику, если она вдруг осталась. Идемпотентна, можно запускать повторно.
 4. Внутри созданного бакета загрузить файлы из локальной папки `renderer-assets-source/` (можно перетаскиванием):
    - `resvg.wasm`
-   - `Inter-Regular.ttf`
-   - `Inter-Bold.ttf`
+   - `Manrope-Regular.ttf`
+   - `Manrope-Bold.ttf`
+   - `Manrope-ExtraBold.ttf`
+   - `SpaceMono-Bold.ttf`
    - `trophy-platinum.png`
    - `trophy-gold.png`
    - `trophy-silver.png`
    - `trophy-bronze.png`
    - `playstation-plus.png`
+
+   Шрифты Manrope (текст, с кириллицей) и Space Mono (моноширинные акценты — ранги, аббревиатуры обложек) — это светлый дизайн карточек «PS5 Минимал». **Без них рендерер падает с 500 на отсутствующем шрифте, поэтому залейте их в бакет перед деплоем.** Старые `Inter-Regular.ttf` / `Inter-Bold.ttf` рендерером больше не используются (лежат в `renderer-assets-source/` как legacy; в бакете можно оставить или удалить).
 5. Проверить доступ из терминала: `curl -I -H "Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>" "https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/renderer-assets/resvg.wasm"` — должен вернуть `HTTP/2 200`. Без заголовка тот же URL должен возвращать `400/404` — это и есть закрытый доступ.
 
 При обновлении шрифтов, wasm или иконок: положить новую версию в `renderer-assets-source/` (для истории и лицензий) и перезалить тот же файл в бакет с тем же именем. Имена в бакете строго совпадают с именами файлов в `renderer-assets-source/`.

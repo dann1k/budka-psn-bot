@@ -3,11 +3,13 @@
 /** @jsxFrag Fragment */
 import satori from "npm:satori@0.13.0";
 import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
-import type { PsnSummary, PsnPlayedGameRich } from "./psn.ts";
+import type { PsnSummary } from "./psn.ts";
 import type { AggregatedPlayer } from "./bot.ts";
 import {
-  getInterBoldBuffer,
-  getInterRegularBuffer,
+  getManropeRegularBuffer,
+  getManropeBoldBuffer,
+  getManropeExtraBoldBuffer,
+  getSpaceMonoBoldBuffer,
   getPlayStationPlusImageDataUrl,
   getResvgWasmBuffer,
   getTrophyImageDataUrl,
@@ -28,10 +30,50 @@ export function h(type: any, props: any, ...children: any[]) {
 
 export const Fragment = (props: any) => props.children;
 
+// --- "PS5 Минимал" light design tokens ---
+// All three cards share this palette: white rounded cards floating on a light
+// page, PlayStation-blue accents, Manrope body + Space Mono for the few Latin
+// monospace accents (rank digits, cover abbreviations).
+const FONT_SANS = "Manrope";
+const FONT_MONO = "Space Mono";
+
+const PAGE_BG = "#eceef1"; // light frame behind the card → makes the rounded corners + shadow read
+const CARD_BG = "#ffffff";
+const CARD_BORDER = "#e6e9ee";
+// resvg's Gaussian blur cost scales with the blurred AREA (box-blur, ~radius-
+// independent), so a card-wide drop shadow added ~150–400ms per card — a 2–4×
+// CPU regression that risks the Supabase Edge ~2s cap on big chats. The card is
+// defined instead by the light outer frame + 1px border, which keeps the render
+// strictly lighter than the pre-redesign dark cards. Do NOT reintroduce a blurred
+// box-shadow over the card/avatar.
+const CARD_SHADOW = "none";
+const CARD_RADIUS = 22;
+
+const INK = "#0a1020"; // primary headings / numbers
+const INK_SOFT = "#3a4452"; // trophy counts
+const MUTED = "#6b7280"; // secondary text
+const LABEL = "#9aa3b0"; // small uppercase labels
+const LABEL_DIM = "#aab2bd"; // column headers
+const RANK_REST = "#b3bbc5"; // rank number for places 4+
+
+const BLUE = "#0070d1";
+const BLUE_GRAD_135 = "linear-gradient(135deg,#0070d1,#39c0ff)"; // avatars
+const BLUE_GRAD_RIGHT = "linear-gradient(to right,#0070d1,#39c0ff)"; // progress / popularity bars
+
+const PANEL_BG = "#f7f9fb"; // trophy + game cells, popular rows
+const PANEL_BORDER = "#eceff3";
+const LEVEL_BG = "#f3f6f9";
+const LEVEL_BORDER = "#eaeef3";
+const CHIP_BG = "#eef3f9"; // region + level chips
+const PILL_TEXT = "#3a6ea5"; // popular player pills
+const TRACK = "#e2e8f0"; // progress / popularity track
+const COVER_BG = "#e8edf3"; // game cover placeholder
+const COVER_TEXT = "#8794a5";
+
 // Logical layout width used by Satori for all cards. Resvg rasterizes the SVG at
 // `width * scale` px; rasterization CPU cost is ~proportional to the output pixel
 // count, and Supabase Edge Functions on the free plan cap CPU at ~2s per request.
-// Summary is a fixed 800x550 card and survives an upscale for crisper text.
+// Summary is a fixed-size card and survives an upscale for crisper text.
 // Leaderboard and popular grow taller with chat size, so by default they DON'T
 // upscale: computeOutputWidth() caps the *total* output pixels to a budget, so a
 // big table auto-downscales instead of getting killed mid-render (which made the
@@ -41,17 +83,18 @@ export const Fragment = (props: any) => props.children;
 // resolution per card type — at their own risk of the ~2s limit on big chats.
 const CARD_LOGICAL_WIDTH = 800;
 const SUMMARY_RENDER_SCALE = 1.4;
-const SUMMARY_LOGICAL_HEIGHT = 550;
-const CARD_BACKGROUND = "#070b19";
 
-// Max output pixels (width * height) for growable cards. ~1.05M px (960x1100, the
-// old 1.2x leaderboard) blew the CPU budget WITH full-size avatars + radial
-// gradients. After Lane 1 (small avatars + flat backgrounds) the per-pixel cost
-// dropped, so a typical table now renders at native 1.0x within budget.
-// MIN_OUTPUT_WIDTH keeps very large tables legible at the cost of slightly
-// exceeding the budget.
+// Max output pixels (width * height) for growable cards. ~1.05M px blew the CPU
+// budget WITH full-size avatars + radial gradients. After Lane 1 (small avatars +
+// flat backgrounds) the per-pixel cost dropped, so a typical table now renders at
+// native 1.0x within budget. MIN_OUTPUT_WIDTH keeps very large tables legible at
+// the cost of slightly exceeding the budget.
 const RASTER_PIXEL_BUDGET = 1_000_000;
 const MIN_OUTPUT_WIDTH = 560;
+
+// Outer light frame so the white card's rounded corners + shadow are visible.
+const OUTER_PAD = 28;
+const CARD_PAD = 30;
 
 // baseScale — потолок апскейла относительно логической ширины; пиксельный бюджет
 // (по площади) не даёт большой карточке выжрать CPU (Edge Function ~2с) — она
@@ -74,12 +117,12 @@ function computeOutputWidth(
 }
 
 // Rough estimate of how many wrapped lines a row of player pills will take,
-// given Satori-rendered Inter Bold 11px pills with 8px horizontal padding
-// and 6px gap between pills. Slightly overestimates per-char width so the
+// given Satori-rendered Manrope Bold 11px pills with 9px horizontal padding
+// and 5px gap between pills. Slightly overestimates per-char width so the
 // computed row height never clips the pills.
 const PILL_AVG_CHAR_WIDTH = 7;
-const PILL_HORIZONTAL_PADDING = 16;
-const PILL_GAP = 6;
+const PILL_HORIZONTAL_PADDING = 18;
+const PILL_GAP = 5;
 
 function estimatePillLines(players: readonly string[], maxWidth: number): number {
   if (players.length === 0) return 1;
@@ -108,8 +151,10 @@ function estimatePillLines(players: readonly string[], maxWidth: number): number
 
 // --- Cache for WASM and Fonts ---
 let isWasmInit = false;
-let fontRegularBuffer: ArrayBuffer | null = null;
-let fontBoldBuffer: ArrayBuffer | null = null;
+let manropeRegularBuffer: ArrayBuffer | null = null;
+let manropeBoldBuffer: ArrayBuffer | null = null;
+let manropeExtraBoldBuffer: ArrayBuffer | null = null;
+let spaceMonoBoldBuffer: ArrayBuffer | null = null;
 
 function assertOpenTypeAsset(name: string, buffer: ArrayBuffer) {
   const signature = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 4)));
@@ -127,17 +172,40 @@ async function initRenderer() {
     isWasmInit = true;
   }
 
-  if (!fontRegularBuffer) {
-    fontRegularBuffer = await getInterRegularBuffer();
-    assertOpenTypeAsset("Inter-Regular.ttf", fontRegularBuffer);
+  if (!manropeRegularBuffer) {
+    manropeRegularBuffer = await getManropeRegularBuffer();
+    assertOpenTypeAsset("Manrope-Regular.ttf", manropeRegularBuffer);
   }
 
-  if (!fontBoldBuffer) {
-    fontBoldBuffer = await getInterBoldBuffer();
-    assertOpenTypeAsset("Inter-Bold.ttf", fontBoldBuffer);
+  if (!manropeBoldBuffer) {
+    manropeBoldBuffer = await getManropeBoldBuffer();
+    assertOpenTypeAsset("Manrope-Bold.ttf", manropeBoldBuffer);
+  }
+
+  if (!manropeExtraBoldBuffer) {
+    manropeExtraBoldBuffer = await getManropeExtraBoldBuffer();
+    assertOpenTypeAsset("Manrope-ExtraBold.ttf", manropeExtraBoldBuffer);
+  }
+
+  if (!spaceMonoBoldBuffer) {
+    spaceMonoBoldBuffer = await getSpaceMonoBoldBuffer();
+    assertOpenTypeAsset("SpaceMono-Bold.ttf", spaceMonoBoldBuffer);
   }
 
   await preloadTrophyImages();
+}
+
+// Satori font set. Manrope carries Cyrillic at 400/700/800; Space Mono is
+// registered at 700 only and used solely for Latin/numeric accents, so its lack
+// of Cyrillic never surfaces. Requested weights snap to the nearest registered
+// one (e.g. Manrope 600 → 700, Space Mono 800 → 700).
+function getFontConfig() {
+  return [
+    { name: FONT_SANS, data: manropeRegularBuffer!, weight: 400, style: "normal" },
+    { name: FONT_SANS, data: manropeBoldBuffer!, weight: 700, style: "normal" },
+    { name: FONT_SANS, data: manropeExtraBoldBuffer!, weight: 800, style: "normal" },
+    { name: FONT_MONO, data: spaceMonoBoldBuffer!, weight: 700, style: "normal" },
+  ];
 }
 
 // --- Image Fetching Helper (converts to Base64) ---
@@ -187,23 +255,6 @@ const PlusIcon = ({ size = 22 }: { size?: number }) => (
   />
 );
 
-const CrownIcon = ({ size = 28 }: { size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="#facc15"
-    stroke="#eab308"
-    strokeWidth="1.5"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    style={{ display: "flex" }}
-  >
-    <path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7z" />
-    <path d="M3 20h18" strokeWidth="2" />
-  </svg>
-);
-
 const AvatarPlaceholder = ({ label, fontSize = 28 }: { label: string; fontSize?: number }) => {
   const initial = label.trim().slice(0, 1).toUpperCase() || "?";
 
@@ -215,8 +266,8 @@ const AvatarPlaceholder = ({ label, fontSize = 28 }: { label: string; fontSize?:
         height: "100%",
         alignItems: "center",
         justifyContent: "center",
-        backgroundImage: "linear-gradient(135deg, #1d4ed8, #7c3aed)",
-        color: "#dbeafe",
+        backgroundImage: BLUE_GRAD_135,
+        color: "#ffffff",
         fontSize: `${fontSize}px`,
         fontWeight: "800",
       }}
@@ -225,18 +276,6 @@ const AvatarPlaceholder = ({ label, fontSize = 28 }: { label: string; fontSize?:
     </div>
   );
 };
-
-const StarIcon = ({ size = 20 }: { size?: number }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="#3b82f6"
-    style={{ display: "flex" }}
-  >
-    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-  </svg>
-);
 
 type PopularGameCardItem = {
   name: string;
@@ -292,27 +331,64 @@ function pluralizeRu(value: number, forms: [string, string, string]): string {
   return forms[2];
 }
 
-function getStatusBadge(status: string | undefined, currentGames: string[], lastOnline: string | null): { text: string; color: string; ringColor: string } {
+// Short uppercase abbreviation for a game-cover placeholder (shown only when the
+// real cover image is missing). "EA SPORTS FC 25" → "EASF", "Helldivers 2" → "HE".
+function gameAbbr(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "—";
+  if (words.length === 1) return words[0].slice(0, 3).toUpperCase();
+  return words
+    .slice(0, 4)
+    .map((word) => word[0])
+    .join("")
+    .toUpperCase();
+}
+
+function getStatusBadge(
+  status: string | undefined,
+  currentGames: string[],
+  lastOnline: string | null,
+): { text: string; color: string } {
   if (status === "playing") {
-    return {
-      text: `В игре: ${currentGames[0] || "играет"}`,
-      color: "#06b6d4",
-      ringColor: "#06b6d4",
-    };
+    return { text: `В игре · ${currentGames[0] || "играет"}`, color: BLUE };
   }
   if (status === "online") {
-    return {
-      text: "В сети",
-      color: "#10b981",
-      ringColor: "#10b981",
-    };
+    return { text: "В сети", color: "#16a34a" };
   }
-  return {
-    text: `Сеть: ${getRelativeTimeStr(lastOnline)}`,
-    color: "#9ca3af",
-    ringColor: "#4b5563",
-  };
+  return { text: `Сеть · ${getRelativeTimeStr(lastOnline)}`, color: LABEL };
 }
+
+// Outer light frame wrapping a white rounded card. Shared by all three cards.
+const CardFrame = ({ height, children }: { height: number; children: any }) => (
+  <div
+    style={{
+      display: "flex",
+      width: `${CARD_LOGICAL_WIDTH}px`,
+      height: `${height}px`,
+      padding: `${OUTER_PAD}px`,
+      backgroundColor: PAGE_BG,
+      fontFamily: FONT_SANS,
+      boxSizing: "border-box",
+    }}
+  >
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        flexGrow: 1,
+        backgroundColor: CARD_BG,
+        border: `1px solid ${CARD_BORDER}`,
+        borderRadius: `${CARD_RADIUS}px`,
+        boxShadow: CARD_SHADOW,
+        padding: `${CARD_PAD}px`,
+        color: INK,
+        boxSizing: "border-box",
+      }}
+    >
+      {children}
+    </div>
+  </div>
+);
 
 // --- Main Render Functions ---
 
@@ -322,63 +398,52 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
     await preloadPlayStationPlusImage();
   }
 
-  // Fetch images in parallel
-  const [avatarBase64, flagBase64, ...gamesBase64] = await Promise.all([
+  // Fetch avatar + recent-game covers in parallel.
+  const [avatarBase64, ...gamesBase64] = await Promise.all([
     fetchImageBase64(preferredSummary.avatarUrl),
-    fetchImageBase64(preferredSummary.region?.code ? `https://flagcdn.com/w80/${preferredSummary.region.code.toLowerCase()}.png` : null),
     ...(preferredSummary.recentGamesRich || []).map((game) => fetchImageBase64(game.imageUrl)),
   ]);
-
-  const finalAvatar = avatarBase64;
 
   const statusInfo = getStatusBadge(
     preferredSummary.presence.status,
     preferredSummary.presence.currentGames,
-    preferredSummary.presence.lastOnline
+    preferredSummary.presence.lastOnline,
   );
 
+  // Deterministic layout heights → fixed card height with no clipping.
+  const HEADER_H = 84;
+  const HEADER_MB = 22;
+  const LEVEL_H = 78;
+  const LEVEL_MB = 16;
+  const TROPHY_H = 104;
+  const TROPHY_MB = 18;
+  const GAMES_LABEL_H = 16;
+  const GAMES_LABEL_MB = 10;
+  const GAME_CELL_H = 72;
+  const cardInnerHeight =
+    HEADER_H + HEADER_MB + LEVEL_H + LEVEL_MB + TROPHY_H + TROPHY_MB + GAMES_LABEL_H + GAMES_LABEL_MB + GAME_CELL_H;
+  const summaryHeight = cardInnerHeight + CARD_PAD * 2 + OUTER_PAD * 2;
+
+  const trophyLabels = { platinum: "ПЛАТИНА", gold: "ЗОЛОТО", silver: "СЕРЕБРО", bronze: "БРОНЗА" };
+
   const cardHtml = (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: CARD_BACKGROUND,
-        width: "800px",
-        height: "550px",
-        fontFamily: "Inter",
-        color: "white",
-        padding: "35px",
-        backgroundImage: "radial-gradient(circle at 85% 15%, rgba(59, 130, 246, 0.18), transparent 50%), radial-gradient(circle at 15% 85%, rgba(139, 92, 246, 0.12), transparent 50%)",
-        border: "1.5px solid rgba(255, 255, 255, 0.08)",
-        boxSizing: "border-box",
-      }}
-    >
+    <CardFrame height={summaryHeight}>
       {/* Profile Header Row */}
-      <div style={{ display: "flex", alignItems: "center", marginBottom: "25px", width: "100%" }}>
-        {/* Avatar with Status Border */}
+      <div style={{ display: "flex", alignItems: "center", width: "100%", height: `${HEADER_H}px`, marginBottom: `${HEADER_MB}px` }}>
         <div
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            width: "90px",
-            height: "90px",
+            width: "82px",
+            height: "82px",
             borderRadius: "50%",
-            border: `3px solid ${statusInfo.ringColor}`,
-            boxShadow: `0 0 15px ${statusInfo.ringColor}44`,
-            marginRight: "20px",
             overflow: "hidden",
+            marginRight: "18px",
           }}
         >
-          {finalAvatar ? (
-            <img
-              src={finalAvatar}
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-              }}
-            />
+          {avatarBase64 ? (
+            <img src={avatarBase64} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           ) : (
             <AvatarPlaceholder label={preferredSummary.onlineId} fontSize={34} />
           )}
@@ -387,46 +452,46 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
         {/* Profile Info */}
         <div style={{ display: "flex", flexDirection: "column", flexGrow: 1 }}>
           <div style={{ display: "flex", alignItems: "center", marginBottom: "4px" }}>
-            <span style={{ fontSize: "28px", fontWeight: "800", letterSpacing: "-0.5px", marginRight: "8px" }}>
+            <span style={{ fontSize: "26px", fontWeight: "800", color: INK, letterSpacing: "-0.5px", marginRight: "9px" }}>
               {preferredSummary.onlineId}
             </span>
             {preferredSummary.hasPlus && (
-              <div style={{ display: "flex", marginRight: "10px" }}>
-                <PlusIcon />
+              <div style={{ display: "flex", marginRight: "9px" }}>
+                <PlusIcon size={22} />
               </div>
             )}
-            {flagBase64 && (
-              <img
-                src={flagBase64}
+            {preferredSummary.region?.code && (
+              <span
                 style={{
-                  width: "28px",
-                  height: "18px",
-                  borderRadius: "3px",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "2px 8px",
+                  borderRadius: "6px",
+                  backgroundColor: CHIP_BG,
+                  color: BLUE,
+                  fontSize: "12px",
+                  fontWeight: "700",
                 }}
-              />
-            )}
-            {!flagBase64 && preferredSummary.region?.code && (
-              <span style={{ fontSize: "13px", color: "#93c5fd", fontWeight: "800" }}>
+              >
                 {preferredSummary.region.code.toUpperCase()}
               </span>
             )}
           </div>
-          <span style={{ fontSize: "16px", color: "#a5b4fc", fontWeight: "500", marginBottom: "4px" }}>
+          <span style={{ fontSize: "15px", color: MUTED, fontWeight: "600", marginBottom: "5px" }}>
             {player.user.username ? `@${player.user.username}` : player.user.displayName}
           </span>
           <div style={{ display: "flex", alignItems: "center" }}>
             <div
               style={{
                 display: "flex",
-                width: "9px",
-                height: "9px",
+                width: "8px",
+                height: "8px",
                 borderRadius: "50%",
                 backgroundColor: statusInfo.color,
                 marginRight: "7px",
               }}
             />
-            <span style={{ fontSize: "14px", color: statusInfo.color, fontWeight: "600" }}>
+            <span style={{ fontSize: "14px", color: statusInfo.color, fontWeight: "700" }}>
               {statusInfo.text}
             </span>
           </div>
@@ -438,198 +503,184 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
         style={{
           display: "flex",
           flexDirection: "column",
-          backgroundColor: "rgba(255, 255, 255, 0.03)",
+          justifyContent: "center",
+          backgroundColor: LEVEL_BG,
           borderRadius: "16px",
-          padding: "16px 20px",
-          marginBottom: "25px",
-          border: "1px solid rgba(255, 255, 255, 0.05)",
+          height: `${LEVEL_H}px`,
+          padding: "0 20px",
+          marginBottom: `${LEVEL_MB}px`,
+          border: `1px solid ${LEVEL_BORDER}`,
           width: "100%",
           boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", width: "100%" }}>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <StarIcon />
-            <span style={{ fontSize: "18px", fontWeight: "800", marginLeft: "8px", color: "#f3f4f6" }}>
-              Уровень {player.level}
-            </span>
-          </div>
-          <span style={{ fontSize: "15px", fontWeight: "700", color: "#3b82f6" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", width: "100%" }}>
+          <span style={{ fontSize: "17px", fontWeight: "800", color: INK }}>
+            Уровень {player.level}
+          </span>
+          <span style={{ fontSize: "15px", fontWeight: "800", color: BLUE }}>
             {player.progress}%
           </span>
         </div>
-        {/* Progress Bar Container */}
         <div
           style={{
             display: "flex",
             width: "100%",
             height: "8px",
-            backgroundColor: "rgba(255,255,255,0.08)",
-            borderRadius: "4px",
+            backgroundColor: TRACK,
+            borderRadius: "5px",
             overflow: "hidden",
           }}
         >
-          {/* Active Gradient Bar */}
           <div
             style={{
               display: "flex",
               width: `${player.progress}%`,
               height: "100%",
-              backgroundImage: "linear-gradient(to right, #3b82f6, #8b5cf6)",
-              boxShadow: "0 0 8px rgba(59, 130, 246, 0.5)",
+              backgroundImage: BLUE_GRAD_RIGHT,
             }}
           />
         </div>
       </div>
 
-      {/* Trophy Counts Panel */}
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "30px", width: "100%" }}>
-        {(["platinum", "gold", "silver", "bronze"] as const).map((type) => {
-          const labels = { platinum: "Платина", gold: "Золото", silver: "Серебро", bronze: "Бронза" };
-          return (
-            <div
-              key={type}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                backgroundColor: "rgba(255, 255, 255, 0.02)",
-                borderRadius: "16px",
-                width: "165px",
-                padding: "12px 10px",
-                border: "1px solid rgba(255, 255, 255, 0.04)",
-                boxSizing: "border-box",
-              }}
-            >
-              <TrophyIcon type={type} size={40} />
-              <span style={{ fontSize: "18px", fontWeight: "800", color: "white", marginTop: "8px", marginBottom: "2px" }}>
-                {player.trophies[type]}
-              </span>
-              <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "600", uppercase: true }}>
-                {labels[type]}
-              </span>
-            </div>
-          );
-        })}
+      {/* Trophy Counts */}
+      <div style={{ display: "flex", justifyContent: "space-between", height: `${TROPHY_H}px`, marginBottom: `${TROPHY_MB}px`, width: "100%" }}>
+        {(["platinum", "gold", "silver", "bronze"] as const).map((type) => (
+          <div
+            key={type}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: PANEL_BG,
+              borderRadius: "14px",
+              width: "162px",
+              height: "100%",
+              border: `1px solid ${PANEL_BORDER}`,
+              boxSizing: "border-box",
+            }}
+          >
+            <TrophyIcon type={type} size={38} />
+            <span style={{ fontSize: "19px", fontWeight: "800", color: INK, marginTop: "6px", marginBottom: "3px" }}>
+              {player.trophies[type]}
+            </span>
+            <span style={{ fontSize: "10px", color: LABEL, fontWeight: "700", letterSpacing: "0.4px" }}>
+              {trophyLabels[type]}
+            </span>
+          </div>
+        ))}
       </div>
 
-      {/* Recently Played Games Section */}
-      <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
-        <span style={{ fontSize: "16px", fontWeight: "800", color: "#e5e7eb", marginBottom: "12px", letterSpacing: "0.5px" }}>
-          НЕДАВНИЕ ИГРЫ
-        </span>
-        <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-          {Array.from({ length: 3 }).map((_, index) => {
-            const game = (preferredSummary.recentGamesRich || [])[index];
-            const gameImg = gamesBase64[index];
+      {/* Recently Played Games */}
+      <span
+        style={{
+          fontSize: "12px",
+          fontWeight: "700",
+          color: LABEL,
+          letterSpacing: "1.5px",
+          height: `${GAMES_LABEL_H}px`,
+          marginBottom: `${GAMES_LABEL_MB}px`,
+        }}
+      >
+        НЕДАВНИЕ ИГРЫ
+      </span>
+      <div style={{ display: "flex", justifyContent: "space-between", width: "100%", height: `${GAME_CELL_H}px` }}>
+        {Array.from({ length: 3 }).map((_, index) => {
+          const game = (preferredSummary.recentGamesRich || [])[index];
+          const gameImg = gamesBase64[index];
 
-            if (!game) {
-              return (
-                <div
-                  key={index}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    backgroundColor: "rgba(255, 255, 255, 0.01)",
-                    borderRadius: "12px",
-                    width: "235px",
-                    height: "70px",
-                    border: "1px dashed rgba(255, 255, 255, 0.03)",
-                    justifyContent: "center",
-                  }}
-                >
-                  <span style={{ fontSize: "13px", color: "#4b5563" }}>Нет данных</span>
-                </div>
-              );
-            }
-
+          if (!game) {
             return (
               <div
                 key={index}
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  backgroundColor: "rgba(255, 255, 255, 0.02)",
+                  justifyContent: "center",
+                  backgroundColor: PANEL_BG,
                   borderRadius: "12px",
-                  width: "235px",
-                  height: "70px",
-                  padding: "8px 10px",
-                  border: "1px solid rgba(255, 255, 255, 0.03)",
+                  width: "220px",
+                  height: "100%",
+                  border: `1px dashed ${PANEL_BORDER}`,
                   boxSizing: "border-box",
                 }}
               >
-                {/* Game Thumbnail */}
-                <div
-                  style={{
-                    display: "flex",
-                    width: "40px",
-                    height: "54px",
-                    borderRadius: "6px",
-                    backgroundColor: "#1e293b",
-                    overflow: "hidden",
-                    marginRight: "12px",
-                  }}
-                >
-                  {gameImg ? (
-                    <img src={gameImg} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  ) : (
-                    <div style={{ display: "flex", width: "100%", height: "100%", backgroundColor: "#334155" }} />
-                  )}
-                </div>
-
-                {/* Game Info */}
-                <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
-                  <span
-                    style={{
-                      fontSize: "13px",
-                      fontWeight: "700",
-                      color: "white",
-                      marginBottom: "4px",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      width: "160px",
-                    }}
-                  >
-                    {game.name}
-                  </span>
-                  <span style={{ fontSize: "12px", color: "#3b82f6", fontWeight: "600" }}>
-                    {parseDurationHours(game.playDuration)}
-                  </span>
-                </div>
+                <span style={{ fontSize: "12px", color: LABEL }}>Нет данных</span>
               </div>
             );
-          })}
-        </div>
+          }
+
+          return (
+            <div
+              key={index}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                backgroundColor: PANEL_BG,
+                borderRadius: "12px",
+                width: "220px",
+                height: "100%",
+                padding: "0 11px",
+                border: `1px solid ${PANEL_BORDER}`,
+                boxSizing: "border-box",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "42px",
+                  height: "56px",
+                  borderRadius: "7px",
+                  backgroundColor: COVER_BG,
+                  overflow: "hidden",
+                  marginRight: "11px",
+                }}
+              >
+                {gameImg ? (
+                  <img src={gameImg} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <span style={{ fontSize: "9px", fontWeight: "700", color: COVER_TEXT, fontFamily: FONT_MONO }}>
+                    {gameAbbr(game.name)}
+                  </span>
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
+                <span
+                  style={{
+                    fontSize: "13px",
+                    fontWeight: "700",
+                    color: INK,
+                    marginBottom: "3px",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    width: "138px",
+                  }}
+                >
+                  {game.name}
+                </span>
+                <span style={{ fontSize: "12px", color: BLUE, fontWeight: "700" }}>
+                  {parseDurationHours(game.playDuration)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
       </div>
-    </div>
+    </CardFrame>
   );
 
   const svg = await satori(cardHtml, {
     width: CARD_LOGICAL_WIDTH,
-    height: 550,
-    fonts: [
-      {
-        name: "Inter",
-        data: fontRegularBuffer!,
-        weight: 400,
-        style: "normal",
-      },
-      {
-        name: "Inter",
-        data: fontBoldBuffer!,
-        weight: 800,
-        style: "normal",
-      },
-    ],
+    height: summaryHeight,
+    fonts: getFontConfig(),
   });
 
-  const outputWidth = computeOutputWidth(
-    CARD_LOGICAL_WIDTH,
-    SUMMARY_LOGICAL_HEIGHT,
-    SUMMARY_RENDER_SCALE,
-    scaleMultiplier,
-  );
+  const outputWidth = computeOutputWidth(CARD_LOGICAL_WIDTH, summaryHeight, SUMMARY_RENDER_SCALE, scaleMultiplier);
   const resvg = new Resvg(svg, {
     fitTo: {
       mode: "width",
@@ -646,144 +697,75 @@ export async function renderGamerCard(player: AggregatedPlayer, preferredSummary
 export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultiplier = 1): Promise<Uint8Array> {
   await initRenderer();
 
-  const rowHeight = 90;
-  const headerHeight = 110;
-  const bottomMargin = 40;
-  const calculatedHeight = headerHeight + players.length * rowHeight + bottomMargin;
+  const HEADER_H = 64;
+  const COL_HEADER_H = 24;
+  const ROW_H = 64;
+  const BOTTOM_PAD = 6;
+  const calculatedHeight =
+    OUTER_PAD * 2 + CARD_PAD * 2 + HEADER_H + COL_HEADER_H + players.length * ROW_H + BOTTOM_PAD;
 
   const renderStartedAt = Date.now();
 
-  // Parallel pre-fetching of all player avatars and flags
-  const avatarsAndFlags = await Promise.all(
-    players.map(async (player) => {
+  // Parallel pre-fetching of all player avatars.
+  const avatars = await Promise.all(
+    players.map((player) => {
       const summary = player.accountSummaries[0];
-      const avatarUrl = summary?.avatarUrlSmall ?? summary?.avatarUrl;
-      const regionCode = summary?.region?.code;
-      const [avatar, flag] = await Promise.all([
-        fetchImageBase64(avatarUrl),
-        fetchImageBase64(regionCode ? `https://flagcdn.com/w80/${regionCode.toLowerCase()}.png` : null),
-      ]);
-      return { avatar, flag, regionCode };
-    })
+      return fetchImageBase64(summary?.avatarUrlSmall ?? summary?.avatarUrl);
+    }),
   );
   const imagesFetchedAt = Date.now();
 
+  // Column widths (card content width = 800 - 2*OUTER_PAD - 2*CARD_PAD = 684).
+  const RANK_W = 46;
+  const LEVEL_W = 80;
+  const TROPHY_W = 224;
+  const PLAYER_W = 684 - RANK_W - LEVEL_W - TROPHY_W;
+
+  const rankBadgeStyles: Record<number, { bg: string; border: string; color: string }> = {
+    1: { bg: "#fff5dc", border: "#f0c14b", color: "#a87b12" },
+    2: { bg: "#f2f4f6", border: "#c8cdd5", color: "#6b7280" },
+    3: { bg: "#f7ece2", border: "#d6a679", color: "#9a5b2a" },
+  };
+
   const leaderboardHtml = (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: CARD_BACKGROUND,
-        width: "800px",
-        height: `${calculatedHeight}px`,
-        fontFamily: "Inter",
-        color: "white",
-        padding: "35px",
-        border: "1.5px solid rgba(255, 255, 255, 0.08)",
-        boxSizing: "border-box",
-      }}
-    >
-      {/* Header section */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", marginBottom: "30px" }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: "6px" }}>
-          <CrownIcon size={34} />
-          <span
-            style={{
-              fontSize: "30px",
-              fontWeight: "800",
-              marginLeft: "10px",
-              letterSpacing: "1px",
-              backgroundImage: "linear-gradient(to right, #3b82f6, #60a5fa)",
-              backgroundClip: "text",
-              color: "white",
-            }}
-          >
-            BUDKA PSN LEADERBOARD
-          </span>
-        </div>
-        <span style={{ fontSize: "14px", color: "#a5b4fc", fontWeight: "600", letterSpacing: "1.5px" }}>
-          ТАБЛИЦА ЛИДЕРОВ ГРУППЫ
+    <CardFrame height={calculatedHeight}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", height: `${HEADER_H}px`, justifyContent: "center" }}>
+        <span style={{ fontSize: "26px", fontWeight: "800", color: INK, letterSpacing: "-0.3px", marginBottom: "5px" }}>
+          Таблица лидеров
+        </span>
+        <span style={{ fontSize: "12px", fontWeight: "700", letterSpacing: "2px", color: LABEL }}>
+          БУДКА · ТОП ИГРОКОВ
         </span>
       </div>
 
-      {/* Header Columns labels */}
+      {/* Column header labels */}
       <div
         style={{
           display: "flex",
+          alignItems: "center",
           width: "100%",
-          padding: "0 25px 8px 25px",
-          borderBottom: "1px solid rgba(255, 255, 255, 0.05)",
-          fontSize: "12px",
-          color: "#4b5563",
+          height: `${COL_HEADER_H}px`,
+          borderBottom: "1px solid #eef1f5",
+          fontSize: "11px",
+          color: LABEL_DIM,
           fontWeight: "800",
           letterSpacing: "1px",
           boxSizing: "border-box",
         }}
       >
-        <span style={{ width: "70px", display: "flex" }}>РАНГ</span>
-        <span style={{ width: "260px", display: "flex" }}>ИГРОК</span>
-        <span style={{ width: "120px", display: "flex" }}>УРОВЕНЬ</span>
-        <span style={{ width: "230px", display: "flex", justifyContent: "flex-end" }}>ТРОФЕИ</span>
+        <span style={{ width: `${RANK_W}px`, display: "flex" }}>#</span>
+        <span style={{ width: `${PLAYER_W}px`, display: "flex" }}>ИГРОК</span>
+        <span style={{ width: `${LEVEL_W}px`, display: "flex", justifyContent: "center" }}>УР.</span>
+        <span style={{ width: `${TROPHY_W}px`, display: "flex", justifyContent: "flex-end" }}>ТРОФЕИ</span>
       </div>
 
-      {/* Players Rows */}
+      {/* Player rows */}
       <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
         {players.map((player, index) => {
           const rank = index + 1;
-          const { avatar, flag, regionCode } = avatarsAndFlags[index];
-          const finalAvatar = avatar;
-          const isFirst = rank === 1;
-
-          let rankBadge = null;
-          if (rank === 1) {
-            rankBadge = <CrownIcon size={24} />;
-          } else if (rank === 2) {
-            rankBadge = (
-              <div
-                style={{
-                  display: "flex",
-                  width: "24px",
-                  height: "24px",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "50%",
-                  backgroundColor: "#9ca3af",
-                  border: "1px solid #78716c",
-                  color: "#1f2937",
-                  fontSize: "12px",
-                  fontWeight: "800",
-                }}
-              >
-                2
-              </div>
-            );
-          } else if (rank === 3) {
-            rankBadge = (
-              <div
-                style={{
-                  display: "flex",
-                  width: "24px",
-                  height: "24px",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "50%",
-                  backgroundColor: "#b45309",
-                  border: "1px solid #7c2d12",
-                  color: "#fef3c7",
-                  fontSize: "12px",
-                  fontWeight: "800",
-                }}
-              >
-                3
-              </div>
-            );
-          } else {
-            rankBadge = (
-              <span style={{ fontSize: "16px", fontWeight: "800", color: "#4b5563" }}>
-                {rank}
-              </span>
-            );
-          }
+          const avatar = avatars[index];
+          const badge = rankBadgeStyles[rank];
+          const handle = player.accountSummaries[0]?.onlineId || player.user.username || "";
 
           return (
             <div
@@ -792,110 +774,116 @@ export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultip
                 display: "flex",
                 alignItems: "center",
                 width: "100%",
-                height: "76px",
-                padding: "0 25px",
-                backgroundColor: isFirst ? "rgba(251, 191, 36, 0.03)" : "rgba(255, 255, 255, 0.01)",
-                borderRadius: "16px",
-                border: isFirst ? "1.5px solid rgba(251, 191, 36, 0.25)" : "1px solid rgba(255, 255, 255, 0.03)",
-                marginTop: "12px",
+                height: `${ROW_H}px`,
+                borderBottom: "1px solid #f1f4f7",
                 boxSizing: "border-box",
-                boxShadow: isFirst ? "0 4px 15px rgba(251, 191, 36, 0.05)" : "none",
               }}
             >
-              {/* Column 1: Rank */}
-              <div style={{ width: "70px", display: "flex", alignItems: "center" }}>
-                {rankBadge}
+              {/* Rank */}
+              <div style={{ width: `${RANK_W}px`, display: "flex", alignItems: "center" }}>
+                {badge ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: "30px",
+                      height: "30px",
+                      borderRadius: "50%",
+                      backgroundColor: badge.bg,
+                      border: `1.5px solid ${badge.border}`,
+                      color: badge.color,
+                      fontSize: "14px",
+                      fontWeight: "800",
+                    }}
+                  >
+                    {rank}
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "30px", height: "30px" }}>
+                    <span style={{ fontSize: "15px", fontWeight: "800", color: RANK_REST }}>{rank}</span>
+                  </div>
+                )}
               </div>
 
-              {/* Column 2: Player Profile */}
-              <div style={{ width: "260px", display: "flex", alignItems: "center" }}>
+              {/* Player */}
+              <div style={{ width: `${PLAYER_W}px`, display: "flex", alignItems: "center" }}>
                 <div
                   style={{
                     display: "flex",
-                    width: "44px",
-                    height: "44px",
+                    width: "40px",
+                    height: "40px",
                     borderRadius: "50%",
-                    border: isFirst ? "2px solid #facc15" : "1.5px solid rgba(255,255,255,0.1)",
                     overflow: "hidden",
-                    marginRight: "14px",
+                    marginRight: "12px",
                   }}
                 >
-                  {finalAvatar ? (
-                    <img src={finalAvatar} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  {avatar ? (
+                    <img src={avatar} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                   ) : (
-                    <AvatarPlaceholder label={player.user.displayName} fontSize={18} />
+                    <AvatarPlaceholder label={player.user.displayName} fontSize={16} />
                   )}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", width: "170px" }}>
-                  <div style={{ display: "flex", alignItems: "center" }}>
-                    <span
-                      style={{
-                        fontSize: "15px",
-                        fontWeight: "800",
-                        color: "white",
-                        marginRight: "6px",
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {player.user.displayName}
-                    </span>
-                    {flag && (
-                      <img src={flag} style={{ width: "18px", height: "12px", borderRadius: "1.5px" }} />
-                    )}
-                    {!flag && regionCode && (
-                      <span style={{ fontSize: "10px", color: "#93c5fd", fontWeight: "800" }}>
-                        {regionCode.toUpperCase()}
-                      </span>
-                    )}
-                  </div>
+                <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", width: `${PLAYER_W - 52}px` }}>
                   <span
                     style={{
-                      fontSize: "12px",
-                      color: "#6b7280",
-                      fontWeight: "500",
+                      fontSize: "15px",
+                      fontWeight: "800",
+                      color: INK,
                       whiteSpace: "nowrap",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                     }}
                   >
-                    {player.accountSummaries[0]?.onlineId || player.user.username || ""}
+                    {player.user.displayName}
                   </span>
+                  {handle && (
+                    <span
+                      style={{
+                        fontSize: "12px",
+                        color: LABEL,
+                        fontWeight: "600",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      @{handle}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* Column 3: Level */}
-              <div style={{ width: "120px", display: "flex", alignItems: "center" }}>
+              {/* Level */}
+              <div style={{ width: `${LEVEL_W}px`, display: "flex", justifyContent: "center", alignItems: "center" }}>
                 <div
                   style={{
                     display: "flex",
                     alignItems: "center",
-                    backgroundColor: isFirst ? "rgba(251, 191, 36, 0.1)" : "rgba(59, 130, 246, 0.08)",
-                    border: isFirst ? "1px solid rgba(251, 191, 36, 0.2)" : "1px solid rgba(59, 130, 246, 0.15)",
+                    backgroundColor: CHIP_BG,
                     borderRadius: "8px",
-                    padding: "4px 10px",
+                    padding: "4px 12px",
                   }}
                 >
-                  <span style={{ fontSize: "14px", fontWeight: "800", color: isFirst ? "#facc15" : "#60a5fa" }}>
+                  <span style={{ fontSize: "14px", fontWeight: "800", color: BLUE }}>
                     {player.level}
                   </span>
                 </div>
               </div>
 
-              {/* Column 4: Trophies summary */}
-              <div style={{ width: "230px", display: "flex", justifyContent: "flex-end", alignItems: "center" }}>
+              {/* Trophies */}
+              <div style={{ width: `${TROPHY_W}px`, display: "flex", justifyContent: "flex-end", alignItems: "center" }}>
                 {(["platinum", "gold", "silver", "bronze"] as const).map((type, tIndex) => (
                   <div
                     key={type}
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      marginLeft: tIndex > 0 ? "14px" : "0",
+                      marginLeft: tIndex > 0 ? "13px" : "0",
                     }}
                   >
-                    <TrophyIcon type={type} size={24} />
-                    <span style={{ fontSize: "14px", fontWeight: "700", color: "white", marginLeft: "4px" }}>
+                    <TrophyIcon type={type} size={20} />
+                    <span style={{ fontSize: "13px", fontWeight: "700", color: INK_SOFT, marginLeft: "4px" }}>
                       {player.trophies[type]}
                     </span>
                   </div>
@@ -905,26 +893,13 @@ export async function renderLeaderboard(players: AggregatedPlayer[], scaleMultip
           );
         })}
       </div>
-    </div>
+    </CardFrame>
   );
 
   const svg = await satori(leaderboardHtml, {
     width: CARD_LOGICAL_WIDTH,
     height: calculatedHeight,
-    fonts: [
-      {
-        name: "Inter",
-        data: fontRegularBuffer!,
-        weight: 400,
-        style: "normal",
-      },
-      {
-        name: "Inter",
-        data: fontBoldBuffer!,
-        weight: 800,
-        style: "normal",
-      },
-    ],
+    fonts: getFontConfig(),
   });
   const satoriDoneAt = Date.now();
 
@@ -949,58 +924,35 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
 
   const topGames = games.slice(0, 5);
   const maxPlayers = Math.max(1, ...topGames.map((game) => game.players.length));
-  const headerHeight = 170;
-  const bottomMargin = 34;
-  const rowMarginBottom = 18;
-  const baseRowHeight = 78;
-  const pillLineHeight = 22;
-  const playerColumnWidth = 345;
-  const pillLinesByGame = topGames.map((game) =>
-    estimatePillLines(game.players, playerColumnWidth),
-  );
-  const rowHeights = pillLinesByGame.map(
-    (lines) => baseRowHeight + Math.max(0, lines - 1) * pillLineHeight,
-  );
+
+  const HEADER_H = 64;
+  const ROW_MB = 12;
+  const BASE_ROW_H = 74;
+  const PILL_LINE_H = 20;
+  const BOTTOM_PAD = 4;
+  const PLAYER_COL_W = 380;
+
+  const pillLinesByGame = topGames.map((game) => estimatePillLines(game.players, PLAYER_COL_W));
+  const rowHeights = pillLinesByGame.map((lines) => BASE_ROW_H + Math.max(0, lines - 1) * PILL_LINE_H);
   const calculatedHeight =
-    headerHeight +
-    rowHeights.reduce((sum, h) => sum + h + rowMarginBottom, 0) +
-    bottomMargin;
+    OUTER_PAD * 2 +
+    CARD_PAD * 2 +
+    HEADER_H +
+    rowHeights.reduce((sum, h) => sum + h + ROW_MB, 0) +
+    BOTTOM_PAD;
+
   const renderStartedAt = Date.now();
   const covers = await Promise.all(topGames.map((game) => fetchImageBase64(game.imageUrl)));
   const imagesFetchedAt = Date.now();
-  const pillColors = ["#2563eb", "#059669", "#b45309", "#9333ea", "#be123c"];
 
   const popularHtml = (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: CARD_BACKGROUND,
-        width: "800px",
-        height: `${calculatedHeight}px`,
-        fontFamily: "Inter",
-        color: "white",
-        padding: "34px 42px",
-        border: "1.5px solid rgba(255, 255, 255, 0.08)",
-        boxSizing: "border-box",
-      }}
-    >
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", marginBottom: "28px" }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: "4px" }}>
-          <span
-            style={{
-              fontSize: "42px",
-              fontWeight: "800",
-              color: "#dbeafe",
-              marginRight: "14px",
-            }}
-          >
-            BUDKA POPULAR GAMES
-          </span>
-          <CrownIcon size={38} />
-        </div>
-        <span style={{ fontSize: "15px", color: "#a5b4fc", fontWeight: "700", letterSpacing: "0px" }}>
-          ПОПУЛЯРНЫЕ ИГРЫ ГРУППЫ
+    <CardFrame height={calculatedHeight}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", height: `${HEADER_H}px`, justifyContent: "center" }}>
+        <span style={{ fontSize: "26px", fontWeight: "800", color: INK, letterSpacing: "-0.3px", marginBottom: "5px" }}>
+          Популярные игры
+        </span>
+        <span style={{ fontSize: "12px", fontWeight: "700", letterSpacing: "2px", color: LABEL }}>
+          БУДКА · ВО ЧТО ИГРАЮТ
         </span>
       </div>
 
@@ -1009,7 +961,7 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
           const rank = index + 1;
           const cover = covers[index];
           const players = game.players;
-          const popularity = Math.max(10, Math.round((game.players.length / maxPlayers) * 100));
+          const popularity = Math.max(8, Math.round((game.players.length / maxPlayers) * 100));
           const rowHeight = rowHeights[index];
 
           return (
@@ -1020,105 +972,89 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
                 alignItems: "center",
                 width: "100%",
                 height: `${rowHeight}px`,
-                padding: "10px 18px",
-                backgroundColor: rank === 1 ? "rgba(251, 191, 36, 0.045)" : "rgba(255, 255, 255, 0.025)",
-                border: rank === 1 ? "1.5px solid rgba(251, 191, 36, 0.28)" : "1px solid rgba(147, 197, 253, 0.16)",
+                padding: "0 14px",
+                backgroundColor: PANEL_BG,
+                border: `1px solid ${PANEL_BORDER}`,
                 borderRadius: "14px",
-                marginBottom: `${rowMarginBottom}px`,
+                marginBottom: `${ROW_MB}px`,
                 boxSizing: "border-box",
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  width: "54px",
-                  height: "54px",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: "50%",
-                  backgroundImage: rank === 1
-                    ? "linear-gradient(135deg, #facc15, #fb923c)"
-                    : "linear-gradient(135deg, #22d3ee, #8b5cf6)",
-                  color: rank === 1 ? "#422006" : "#eff6ff",
-                  fontSize: "24px",
-                  fontWeight: "800",
-                  border: rank === 1 ? "2px solid #fde68a" : "2px solid #67e8f9",
-                  marginRight: "18px",
-                }}
-              >
+              <span style={{ fontSize: "24px", fontWeight: "800", color: "#c2cad4", width: "26px", fontFamily: FONT_MONO, marginRight: "16px" }}>
                 {rank}
-              </div>
+              </span>
 
               <div
                 style={{
                   display: "flex",
-                  width: "56px",
-                  height: "56px",
-                  borderRadius: "9px",
-                  backgroundColor: "#111827",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "50px",
+                  height: "50px",
+                  borderRadius: "11px",
+                  backgroundColor: COVER_BG,
                   overflow: "hidden",
-                  marginRight: "22px",
-                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  marginRight: "16px",
                 }}
               >
                 {cover ? (
                   <img src={cover} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 ) : (
-                  <AvatarPlaceholder label={game.name} fontSize={22} />
+                  <span style={{ fontSize: "11px", fontWeight: "700", color: COVER_TEXT, fontFamily: FONT_MONO }}>
+                    {gameAbbr(game.name)}
+                  </span>
                 )}
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", width: `${playerColumnWidth}px`, marginRight: "22px" }}>
+              <div style={{ display: "flex", flexDirection: "column", width: `${PLAYER_COL_W}px`, marginRight: "16px" }}>
                 <span
                   style={{
-                    fontSize: "22px",
+                    fontSize: "18px",
                     fontWeight: "800",
-                    color: "#f8fafc",
+                    color: INK,
                     whiteSpace: "nowrap",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
-                    marginBottom: "8px",
+                    marginBottom: "7px",
                   }}
                 >
                   {game.name}
                 </span>
                 <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", width: "100%" }}>
-                  {players.map((player, playerIndex) => (
+                  {players.map((playerName) => (
                     <div
-                      key={`${game.name}-${player}`}
+                      key={`${game.name}-${playerName}`}
                       style={{
                         display: "flex",
-                        padding: "3px 8px",
-                        borderRadius: "12px",
-                        backgroundColor: pillColors[playerIndex % pillColors.length],
-                        color: "#e0f2fe",
+                        padding: "3px 9px",
+                        borderRadius: "8px",
+                        backgroundColor: CHIP_BG,
+                        color: PILL_TEXT,
                         fontSize: "11px",
                         fontWeight: "700",
-                        marginRight: "6px",
+                        marginRight: "5px",
                         marginBottom: "4px",
                       }}
                     >
-                      <span style={{ whiteSpace: "nowrap" }}>
-                        {player}
-                      </span>
+                      <span style={{ whiteSpace: "nowrap" }}>{playerName}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, alignItems: "flex-end" }}>
-                <span style={{ fontSize: "12px", color: "#c4b5fd", fontWeight: "700", marginBottom: "8px" }}>
-                  Популярность
+                <span style={{ fontSize: "20px", fontWeight: "800", color: BLUE, marginBottom: "7px" }}>
+                  {game.players.length}
                 </span>
                 <div
                   style={{
                     display: "flex",
-                    width: "140px",
-                    height: "9px",
-                    backgroundColor: "rgba(148, 163, 184, 0.22)",
-                    borderRadius: "5px",
+                    width: "120px",
+                    height: "7px",
+                    backgroundColor: TRACK,
+                    borderRadius: "4px",
                     overflow: "hidden",
-                    marginBottom: "8px",
+                    marginBottom: "7px",
                   }}
                 >
                   <div
@@ -1126,38 +1062,25 @@ export async function renderPopularGames(games: PopularGameCardItem[], scaleMult
                       display: "flex",
                       width: `${popularity}%`,
                       height: "100%",
-                      backgroundImage: "linear-gradient(to right, #38bdf8, #8b5cf6)",
+                      backgroundImage: BLUE_GRAD_RIGHT,
                     }}
                   />
                 </div>
-                <span style={{ fontSize: "13px", color: "#cbd5e1", fontWeight: "700" }}>
-                  {game.players.length} {pluralizeRu(game.players.length, ["участник", "участника", "участников"])}
+                <span style={{ fontSize: "11px", color: LABEL, fontWeight: "600" }}>
+                  {pluralizeRu(game.players.length, ["участник", "участника", "участников"])}
                 </span>
               </div>
             </div>
           );
         })}
       </div>
-    </div>
+    </CardFrame>
   );
 
   const svg = await satori(popularHtml, {
     width: CARD_LOGICAL_WIDTH,
     height: calculatedHeight,
-    fonts: [
-      {
-        name: "Inter",
-        data: fontRegularBuffer!,
-        weight: 400,
-        style: "normal",
-      },
-      {
-        name: "Inter",
-        data: fontBoldBuffer!,
-        weight: 800,
-        style: "normal",
-      },
-    ],
+    fonts: getFontConfig(),
   });
   const satoriDoneAt = Date.now();
 
